@@ -658,6 +658,14 @@ onBeforeUnmount(() => {
     </header>
 
     <main class="query-workspace">
+      <el-alert
+        class="query-retention-notice"
+        title="卡密信息将在提取 24 小时后删除"
+        description="请及时下载并妥善保存 2FA 文件。"
+        type="warning"
+        show-icon
+        :closable="false"
+      />
       <el-tabs v-model="activeWorkflow" class="query-workflow-tabs">
         <el-tab-pane name="extract">
           <template #label>
@@ -709,7 +717,7 @@ onBeforeUnmount(() => {
                     <el-button :icon="CloseBold" @click="backToInput">清除结果</el-button>
                     <el-button v-if="canDownload" :icon="Download" plain @click="downloadZip">CPA 压缩包</el-button>
                     <el-button v-if="canDownload" type="primary" :icon="Download" @click="downloadSub">sub2api JSON</el-button>
-                    <el-button v-if="canDownload" :icon="Download" @click="downloadTwoFactor">2FA TXT</el-button>
+                    <el-button v-if="canDownload" type="warning" size="large" class="query-2fa-download" :icon="Download" @click="downloadTwoFactor">下载 2FA 文件</el-button>
                   </div>
                 </div>
 
@@ -853,7 +861,7 @@ onBeforeUnmount(() => {
                   </div>
                   <el-button :icon="Download" plain @click="downloadReauth('cpa')">CPA ZIP</el-button>
                   <el-button type="primary" :icon="Download" @click="downloadReauth('sub2api')">sub2api JSON</el-button>
-                  <el-button :icon="Download" @click="downloadReauth('2fa')">2FA TXT</el-button>
+                  <el-button type="warning" size="large" class="query-2fa-download" :icon="Download" @click="downloadReauth('2fa')">下载 2FA 文件</el-button>
                 </div>
                 <div class="query-download-group">
                   <div>
@@ -862,7 +870,7 @@ onBeforeUnmount(() => {
                   </div>
                   <el-button :icon="Download" plain @click="downloadReauth('card-cpa')">CPA ZIP</el-button>
                   <el-button :icon="Download" @click="downloadReauth('card-sub2api')">sub2api JSON</el-button>
-                  <el-button :icon="Download" @click="downloadReauth('card-2fa')">2FA TXT</el-button>
+                  <el-button type="warning" size="large" class="query-2fa-download" :icon="Download" @click="downloadReauth('card-2fa')">下载 2FA 文件</el-button>
                 </div>
               </div>
 
@@ -1039,3 +1047,30 @@ onBeforeUnmount(() => {
     </main>
   </div>
 </template>
+
+<style scoped>
+.query-retention-notice {
+  --el-color-warning: #92400e;
+  margin-bottom: 18px;
+  border: 1px solid #e6a23c;
+}
+
+.query-retention-notice :deep(.el-alert__title) {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.query-2fa-download :deep(svg) {
+  color: inherit;
+}
+
+.query-2fa-download.el-button {
+  --el-button-bg-color: #a64b00;
+  --el-button-border-color: #a64b00;
+  --el-button-hover-bg-color: #873d00;
+  --el-button-hover-border-color: #873d00;
+  --el-button-active-bg-color: #703200;
+  --el-button-active-border-color: #703200;
+  font-weight: 700;
+}
+</style>
