@@ -35,6 +35,7 @@ jobs:
           pip install -r requirements-python.txt
           python -B tools/verify_reauth_retry.py
           python -B tools/verify_two_factor_stock.py
+          python -B tools/verify_two_factor_import.py
           python -B - <<'PY'
           import runpy
           from pathlib import Path

@@ -51,8 +51,6 @@ def import_two_factor(db, text: str, owner_id: int, business_type: str, group_ta
         ).all())
     matched = {record.email_name.lower() for record in records if record.payload}
     missing = [email for email in emails if email not in matched]
-    if not matched:
-        raise BusinessError(f"当前文件池未匹配到邮箱：{'、'.join(missing[:10])}")
     for record in records:
         if not record.payload:
             continue
