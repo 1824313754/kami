@@ -1,0 +1,1 @@
+import{Ct as e,G as t,Ot as n,W as r,kt as i}from"./index-a40ZCtg0.js";var a={__name:`QueryResultView`,setup(a){let o=r(),s=t();return n(()=>{let e=String(o.query.job_id||``).trim();if(e){s.replace({name:`query`,query:{job_id:e,token:o.query.token}});return}s.replace({name:`query`})}),(t,n)=>(i(),e(`div`))}};export{a as default};

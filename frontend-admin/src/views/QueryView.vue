@@ -951,11 +951,22 @@ onBeforeUnmount(() => {
           <template #label>
             <span class="query-tab-label">
               <el-icon><Message /></el-icon>
-              2FA 验证码
+              <span class="query-totp-tab-title">
+                2FA 验证码
+                <small>邮箱 / 密码 / 验证码</small>
+              </span>
             </span>
           </template>
 
           <div class="query-totp-workbench">
+            <el-alert
+              class="query-totp-help"
+              title="账号邮箱、密码、2FA 验证码看这里"
+              description="输入卡密并加载邮箱，选择账号后点击「获取验证码」，即可查看登录邮箱、密码和当前 2FA 验证码。"
+              type="info"
+              show-icon
+              :closable="false"
+            />
             <el-form label-position="top" class="query-totp-controls">
               <div class="query-section-heading">
                 <div>
@@ -1072,5 +1083,21 @@ onBeforeUnmount(() => {
   --el-button-active-bg-color: #703200;
   --el-button-active-border-color: #703200;
   font-weight: 700;
+}
+
+.query-totp-tab-title {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.query-totp-tab-title small {
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.query-totp-help {
+  --el-color-info: #334155;
+  grid-column: 1 / -1;
 }
 </style>

@@ -1,0 +1,1 @@
+import{Ct as e,G as t,Ot as n,W as r,kt as i}from"./index-a40ZCtg0.js";var a={__name:`QueryProgressView`,setup(a){let o=r(),s=t();return n(()=>{s.replace({name:`query`,query:{job_id:o.params.jobId,token:o.query.token}})}),(t,n)=>(i(),e(`div`))}};export{a as default};
