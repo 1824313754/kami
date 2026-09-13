@@ -2,12 +2,12 @@
 
 查询页提取完成后，点击 CPA 压缩包或 sub2api JSON，将同时下载所选格式文件和对应账号的 2FA TXT，无需再次点击 2FA 按钮。独立的 2FA TXT 按钮仍可用于补下载，不会重复触发其他文件。
 
-重新授权结果也使用同一规则：授权结果下载附带成功账号的 2FA；原卡密最新结果下载附带该卡密账号的 2FA。两类下载分别沿用原接口的账号范围和任务访问凭证。
+重新授权结果和原卡密最新结果下载只保存所选格式，不自动附带 2FA TXT；需要时可点击独立的 2FA TXT 按钮。两类下载分别沿用原接口的账号范围和任务访问凭证。
 
-前端先获取两个文件，再交给浏览器保存。如果任一请求失败，会提示错误，不提示完整下载成功。已有历史账号缺少 2FA 时，需先补导入。浏览器若询问是否允许下载多个文件，选择允许；也可以使用独立 2FA 按钮补下载。
+普通提取下载时，前端先获取两个文件，再交给浏览器保存。如果任一请求失败，会提示错误，不提示完整下载成功。已有历史账号缺少 2FA 时，需先补导入。浏览器若询问是否允许下载多个文件，选择允许；也可以使用独立 2FA 按钮补下载。
 
 CPA ZIP 和 Sub2API JSON 内部格式不变，2FA TXT 是额外的独立文件。刷新结果页不会自行重复下载；用户点击所选格式后才发起下载。
 
 验证命令：`node tools/verify_paired_download.mjs`。用例执行查询页实际下载函数，以模拟 API 和保存操作检查格式组合、任务范围、文件名、失败处理及未完成任务限制。
 
-镜像发布成功后，生产执行 `docker compose pull` 和 `docker compose up -d --no-build --remove-orphans` 更新。回滚可将 `PYFAKA_IMAGE` 或 Compose 中固定的 `image` 指向 `ghcr.io/1824313754/kami:sha-8500817397d9ddf8fc09e3ffca0dabceb0fbed06`，再执行这两条命令。
+镜像发布成功后，生产执行 `docker compose pull` 和 `docker compose up -d --no-build --remove-orphans` 更新。回滚可将 `PYFAKA_IMAGE` 或 Compose 中固定的 `image` 指向 `ghcr.io/1824313754/kami:sha-dc4ea530e5044bbf63d56f60549e4b1047782757`，再执行这两条命令。

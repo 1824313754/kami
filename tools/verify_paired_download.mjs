@@ -61,7 +61,7 @@ try {
   await scenario('downloadSub()', ['sub', '2fa'])
   await scenario('downloadTwoFactor()', ['2fa'])
   for (const format of ['cpa', 'sub2api', 'card-cpa', 'card-sub2api']) {
-    await scenario(`downloadReauth('${format}')`, [format, format.startsWith('card-') ? 'card-2fa' : '2fa'])
+    await scenario(`downloadReauth('${format}')`, [format])
   }
   for (const format of ['2fa', 'card-2fa']) await scenario(`downloadReauth('${format}')`, [format])
   assert.deepEqual(await scenario('downloadZip()', ['cpa', '2fa'], { noHeader: true }), ['query-files.zip', 'accounts-2fa.txt'])
@@ -69,7 +69,7 @@ try {
   await scenario('downloadSub()', ['sub', '2fa'], { fail: '2fa' })
   await scenario('downloadZip()', [], { enabled: false })
   await scenario("downloadReauth('cpa')", [], { enabled: false })
-  console.log('PASS: CPA/Sub paired 2FA; reauth scope; standalone TXT; filenames; access params; failure handling; unfinished job guards')
+  console.log('PASS: extraction paired 2FA; reauth selected format only; standalone TXT; filenames; access params; failure handling; unfinished job guards')
 } catch (error) {
   console.error('FAIL: ' + error.message)
   process.exitCode = 1

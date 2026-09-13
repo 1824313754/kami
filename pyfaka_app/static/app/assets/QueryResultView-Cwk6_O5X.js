@@ -1,0 +1,1 @@
+import{Dt as e,G as t,Ot as n,St as r,W as i}from"./index-CP8aduLq.js";var a={__name:`QueryResultView`,setup(a){let o=i(),s=t();return e(()=>{let e=String(o.query.job_id||``).trim();if(e){s.replace({name:`query`,query:{job_id:e,token:o.query.token}});return}s.replace({name:`query`})}),(e,t)=>(n(),r(`div`))}};export{a as default};
