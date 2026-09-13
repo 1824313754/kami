@@ -193,26 +193,19 @@ function saveBlobFile(blob, filename) {
   window.URL.revokeObjectURL(url)
 }
 
-async function runDownload(label, requestFn, fallbackName, twoFactorRequest = null) {
+async function runDownload(label, requestFn, fallbackName) {
   downloadState.value = {
     active: true,
     label,
     phase: '正在打包下载文件',
   }
   try {
-    const [response, twoFactorResponse] = await Promise.all([
-      requestFn(queryAccessParams.value),
-      twoFactorRequest?.(queryAccessParams.value),
-    ])
+    const response = await requestFn(queryAccessParams.value)
     const filename = resolveFilename(response.headers['content-disposition'], fallbackName)
     downloadState.value.phase = '正在写入浏览器下载'
     saveBlobFile(response.data, filename)
-    if (twoFactorResponse) {
-      const twoFactorFilename = resolveFilename(twoFactorResponse.headers['content-disposition'], 'accounts-2fa.txt')
-      saveBlobFile(twoFactorResponse.data, twoFactorFilename)
-    }
     downloadState.value.phase = '下载已开始'
-    ElMessage.success(`${label}${twoFactorResponse ? '及 2FA TXT' : ''}已开始保存`)
+    ElMessage.success(`${label}已开始保存`)
   } catch (error) {
     downloadState.value.phase = '下载失败'
     if (error?.response?.data instanceof Blob) {
@@ -232,17 +225,17 @@ async function runDownload(label, requestFn, fallbackName, twoFactorRequest = nu
 
 function downloadZip() {
   if (!canDownload.value) return
-  return runDownload('CPA 压缩包下载', downloadQueryFiles, 'query-files.zip', downloadQueryTwoFactor)
+  runDownload('CPA 压缩包下载', downloadQueryFiles, downloadQueryTwoFactor, 'query-files.zip')
 }
 
 function downloadTwoFactor() {
   if (!canDownload.value) return
-  return runDownload('2FA TXT 下载', downloadQueryTwoFactor, 'accounts-2fa.txt')
+  runDownload('2FA TXT 下载', downloadQueryTwoFactor, 'accounts-2fa.txt')
 }
 
 function downloadSub() {
   if (!canDownload.value) return
-  return runDownload('sub2api JSON 下载', downloadQuerySub, 'query-files-sub2api.json', downloadQueryTwoFactor)
+  runDownload('sub2api JSON 下载', downloadQuerySub, 'query-files-sub2api.json')
 }
 
 function downloadReauth(format) {
@@ -253,7 +246,7 @@ function downloadReauth(format) {
   const extension = { cpa: 'zip', sub2api: 'json', '2fa': 'txt' }[kind]
   const label = `${isCard ? '原卡密最新' : '重登授权'} ${title} 下载`
   const fallback = `${format}.${extension}`
-  return runDownload(
+  runDownload(
     label,
     () => downloadQueryReauth(reauth.value.job.id, format, reauthAccessParams.value),
     fallback,
