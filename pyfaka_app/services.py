@@ -19,6 +19,7 @@ from .auth_store import (
     check_auth_payload,
 )
 from .database import SessionLocal
+from .reauth.totp import normalize_secret
 from .live_check import LiveCheckResult
 from .models import AdminUser, AppSetting, Cdkey, CdkeyBatch, FileRecord, FileRecordPayload, UploadBatch, UploadResult
 
@@ -694,6 +695,32 @@ def count_scoped_files(
     return int(query.scalar() or 0)
 
 
+def has_delivery_two_factor(raw: str) -> bool:
+    try:
+        info = json.loads(raw or "{}")
+        if not isinstance(info, dict) or not str(info.get("password") or "").strip():
+            return False
+        normalize_secret(info.get("totp_secret"))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def count_two_factor_stock(db: Session, owner_id: int, business_type: str, group_tag: str) -> int:
+    rows = (
+        db.query(FileRecordPayload.reauth_info)
+        .join(FileRecord, FileRecord.id == FileRecordPayload.file_record_id)
+        .filter(
+            FileRecord.uploaded_by == owner_id,
+            FileRecord.business_type == business_type,
+            FileRecord.group_tag == group_tag,
+            FileRecord.status == "AVAILABLE",
+        )
+        .yield_per(500)
+    )
+    return sum(has_delivery_two_factor(raw) for (raw,) in rows)
+
+
 def count_cdkeys(db: Session, owner_id: int | None, status: str | None = None) -> int:
     query = db.query(func.count(Cdkey.id)).join(CdkeyBatch)
     if owner_id is not None:
@@ -868,13 +895,13 @@ def capacity_for_owner(db: Session, owner_id: int, business_type: str = DEFAULT_
         raise BusinessError("用户不存在")
     business_type = normalize_business_type(business_type)
     group_tag = normalize_group_tag(group_tag)
-    available = count_scoped_files(db, owner_id, business_type, group_tag, "AVAILABLE")
+    available = count_two_factor_stock(db, owner_id, business_type, group_tag)
     reserved = sum_scoped_cdkey_files(db, owner_id, business_type, group_tag, "PENDING")
     remaining = max(0, available - reserved)
     configured = configured_over_issue_files(db, owner, business_type)
     used_over = used_over_issue_files_for_business(db, owner_id, business_type)
     remaining_over = max(0, configured - used_over)
-    return Capacity(available, reserved, remaining, configured, used_over, remaining_over, remaining + remaining_over)
+    return Capacity(available, reserved, remaining, configured, used_over, remaining_over, remaining)
 
 
 def generate_code(prefix: str, key_date: date) -> str:
@@ -900,7 +927,7 @@ def create_cdkey_batch(
     requested = total_count * files_per_key
     cap = capacity_for_owner(db, owner_id, business_type, group_tag)
     if requested > cap.total_bindable_files:
-        raise BusinessError("当前库存不足，超发额度不足")
+        raise BusinessError(f"已导入有效 2FA 的库存不足：需要 {requested} 个，当前可生成 {cap.total_bindable_files} 个文件额度")
     current = date.today()
     prefix = f"{files_per_key}{business_code(business_type)}"
     batch = CdkeyBatch(
@@ -961,6 +988,14 @@ def import_cdkey_batch(
     for code in import_codes:
         files_per_key, business_type = code_scopes[code]
         grouped.setdefault((files_per_key, business_type), []).append(code)
+
+    needed_by_business: dict[str, int] = {}
+    for (files_per_key, business_type), group_codes in grouped.items():
+        needed_by_business[business_type] = needed_by_business.get(business_type, 0) + files_per_key * len(group_codes)
+    for business_type, needed in needed_by_business.items():
+        cap = capacity_for_owner(db, owner_id, business_type, DEFAULT_GROUP_TAG)
+        if needed > cap.total_bindable_files:
+            raise BusinessError(f"已导入有效 2FA 的库存不足：需要 {needed} 个，当前可生成 {cap.total_bindable_files} 个文件额度")
 
     current = date.today()
     batches: list[CdkeyBatch] = []
@@ -1259,7 +1294,8 @@ def claim_available_file_ids(
     seen_ids: set[int] = set()
     while len(claimed_ids) < limit:
         query = (
-            db.query(FileRecord.id)
+            db.query(FileRecord.id, FileRecordPayload.reauth_info)
+            .join(FileRecordPayload, FileRecordPayload.file_record_id == FileRecord.id)
             .filter(
                 FileRecord.status == "AVAILABLE",
                 FileRecord.uploaded_by == owner_id,
@@ -1271,11 +1307,13 @@ def claim_available_file_ids(
         ignored_ids = excluded_ids | seen_ids | set(claimed_ids)
         if ignored_ids:
             query = query.filter(~FileRecord.id.in_(ignored_ids))
-        candidate_ids = [row[0] for row in query.limit(max((limit - len(claimed_ids)) * 2, 1)).all()]
-        if not candidate_ids:
+        candidates = query.limit(max((limit - len(claimed_ids)) * 2, 1)).all()
+        if not candidates:
             break
-        seen_ids.update(candidate_ids)
-        for record_id in candidate_ids:
+        seen_ids.update(record_id for record_id, _raw in candidates)
+        for record_id, raw in candidates:
+            if not has_delivery_two_factor(raw):
+                continue
             updated = (
                 db.query(FileRecord)
                 .filter(FileRecord.id == record_id, FileRecord.status == "AVAILABLE")

@@ -300,7 +300,7 @@ watch(
         <div class="metric-value">{{ dataState.pagination.total }}</div>
       </el-card>
       <el-card shadow="never" class="metric-card mini">
-        <div class="metric-label">可生成文件数</div>
+        <div class="metric-label">2FA 可生成文件数</div>
         <div class="metric-value">{{ dataState.capacity?.total_bindable_files || 0 }}</div>
       </el-card>
       <el-card shadow="never" class="metric-card mini">
@@ -373,6 +373,7 @@ watch(
     </el-card>
 
     <el-dialog v-model="createDialogVisible" title="卡密生成" width="520px">
+      <p>仅使用已导入有效 2FA 的库存，扣除待提取卡密占用；超发额度不增加可生成数量。</p>
       <el-form label-position="top">
         <el-form-item label="生成数量">
           <el-input-number v-model="createForm.total_count" :min="1" :max="10000" />
