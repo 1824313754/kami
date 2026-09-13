@@ -255,9 +255,9 @@ function downloadReauth(format) {
   const fallback = `${format}.${extension}`
   return runDownload(
     label,
-      () => downloadQueryReauth(reauth.value.job.id, format, reauthAccessParams.value),
-      fallback,
-    )
+    () => downloadQueryReauth(reauth.value.job.id, format, reauthAccessParams.value),
+    fallback,
+  )
 }
 
 const queryAccessParams = computed(() => ({
