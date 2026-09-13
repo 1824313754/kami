@@ -1,0 +1,7 @@
+Flask>=3.0
+SQLAlchemy>=2.0
+PyMySQL>=1.1
+certifi
+curl-cffi>=0.7.0
+requests
+PySocks>=1.7.1

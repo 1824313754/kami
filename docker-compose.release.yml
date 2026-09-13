@@ -1,0 +1,43 @@
+services:
+  pyfaka:
+    image: ${PYFAKA_IMAGE:-ghcr.io/1824313754/kami:main}
+    container_name: ${PYFAKA_CONTAINER_NAME:-pyfaka}
+    restart: unless-stopped
+    ports:
+      - "${PYFAKA_BIND_ADDRESS:-0.0.0.0}:${PYFAKA_HTTP_PORT:-8099}:8099"
+    volumes:
+      - type: bind
+        source: ${PYFAKA_DATA_DIR:-./data}
+        target: /app/data
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    environment:
+      PYFAKA_HOST: 0.0.0.0
+      PYFAKA_PORT: 8099
+      PYFAKA_DEBUG: 0
+      PYFAKA_TIMEZONE: ${PYFAKA_TIMEZONE:-Asia/Shanghai}
+      TZ: ${TZ:-Asia/Shanghai}
+      PYFAKA_DATABASE_URL: ""
+      PYFAKA_SECRET_KEY: ${PYFAKA_SECRET_KEY:?set PYFAKA_SECRET_KEY in .env}
+      PYFAKA_ADMIN_USERNAME: ${PYFAKA_ADMIN_USERNAME:-admin}
+      PYFAKA_ADMIN_PASSWORD: ${PYFAKA_ADMIN_PASSWORD:?set PYFAKA_ADMIN_PASSWORD in .env}
+      PYFAKA_COOKIE_SECURE: ${PYFAKA_COOKIE_SECURE:-0}
+      PYFAKA_SESSION_MINUTES: ${PYFAKA_SESSION_MINUTES:-20}
+      PYFAKA_MAX_CONTENT_LENGTH: ${PYFAKA_MAX_CONTENT_LENGTH:-10737418240}
+      PYFAKA_MAX_FORM_MEMORY_SIZE: ${PYFAKA_MAX_FORM_MEMORY_SIZE:-67108864}
+      PYFAKA_MAX_FORM_PARTS: ${PYFAKA_MAX_FORM_PARTS:-50000}
+      PYFAKA_REAUTH_PROXY: ${PYFAKA_REAUTH_PROXY:-}
+      PYFAKA_REAUTH_OTP_TIMEOUT: ${PYFAKA_REAUTH_OTP_TIMEOUT:-180}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/api/query/stock', timeout=5).read()\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
