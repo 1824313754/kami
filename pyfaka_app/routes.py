@@ -51,6 +51,7 @@ from .services import (
     capacity_for_owner,
     cdkey_filters,
     cdkeys_csv,
+    cpa_payload_for_export,
     count_files,
     count_scoped_cdkeys,
     count_scoped_files,
@@ -2841,7 +2842,10 @@ def run_file_download_job(job_id: str, file_ids: list[int], owner_id: int | None
                         payload = {}
                     operation_time = full_clock_text()
                     if payload:
-                        archive.writestr(f"{safe_name(record.email_name)}.json", json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+                        archive.writestr(
+                            f"{safe_name(record.email_name)}.json",
+                            json.dumps(cpa_payload_for_export(payload), ensure_ascii=False, indent=2).encode("utf-8"),
+                        )
                         success += 1
                         result = "成功"
                         reason = "已打包"
@@ -3386,7 +3390,10 @@ def run_query_reauth_job(job_id: str, file_ids: list[int], download_file_ids: li
             raise BusinessError("没有账号重新授权成功")
         with zipfile.ZipFile(cpa_path, "w", zipfile.ZIP_DEFLATED) as archive:
             for email, payload in successful:
-                archive.writestr(f"{safe_name(email)}.json", json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+                archive.writestr(
+                    f"{safe_name(email)}.json",
+                    json.dumps(cpa_payload_for_export(payload), ensure_ascii=False, indent=2).encode("utf-8"),
+                )
         sub_path.write_bytes(sub2api_json_for_payloads(successful))
         worker_db.expire_all()
         card_records = (
@@ -3403,7 +3410,10 @@ def run_query_reauth_job(job_id: str, file_ids: list[int], download_file_ids: li
             for record, (_name, payload) in zip(card_records, card_items):
                 if not payload:
                     raise BusinessError(f"账号字段内容不存在：{record.email_name}")
-                archive.writestr(f"{safe_name(record.email_name)}.json", json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+                archive.writestr(
+                    f"{safe_name(record.email_name)}.json",
+                    json.dumps(cpa_payload_for_export(payload), ensure_ascii=False, indent=2).encode("utf-8"),
+                )
         card_sub_path.write_bytes(sub2api_json_for_payloads(card_items))
         worker_db.add(AuditLog(action="QUERY_REAUTH", target_type="file_record", ip=ip, detail=f"job={job_id}, success={len(successful)}, failure={len(rows) - len(successful)}, workers={workers}"))
         worker_db.commit()

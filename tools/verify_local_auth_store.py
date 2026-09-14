@@ -223,12 +223,15 @@ def main():
                 assert_true(names == ["test@example.com.json"], "zip should contain account json")
                 exported = json.loads(archive.read(names[0]).decode("utf-8"))
             assert_true(exported["refresh_token"] == "refresh", "download should rebuild json from database fields")
+            assert_true(exported["type"] == "codex", "CPA export should use codex type")
             assert_true("client_id" not in exported, "client_id should not be exported")
             assert_true("device_id" not in exported, "device_id should not be exported")
             assert_true("password" not in exported, "password should not be exported")
             assert_true("user_agent" not in exported, "user_agent should not be exported")
             assert_true("reauth_info" not in exported, "CPA export should omit reauth_info")
-            assert_true("reauth_info" not in admin_download_export("default"), "admin ZIP should omit reauth_info")
+            admin_exported = admin_download_export("default")
+            assert_true(admin_exported["type"] == "codex", "admin CPA export should use codex type")
+            assert_true("reauth_info" not in admin_exported, "admin ZIP should omit reauth_info")
 
             default_sub = json.loads(sub2api_json_for_files(db, [record]).decode("utf-8"))
             assert_true(default_sub["accounts"][0]["name"] == "test@example.com", "sub2api name should use email")
@@ -375,6 +378,7 @@ def main():
                 with ZipFile(Path(workspace) / "reauth_jobs" / reauth_job_id / "reauth-cpa.zip") as archive:
                     reauth_export = json.loads(archive.read("test@example.com.json").decode("utf-8"))
                 assert_true(reauth_export["access_token"] == "access-reauthorized", "reauth CPA should contain the refreshed token")
+                assert_true(reauth_export["type"] == "codex", "reauth CPA should use codex type")
                 assert_true("reauth_info" not in reauth_export, "reauth CPA should omit reauth_info")
                 reauth_sub = json.loads((Path(workspace) / "reauth_jobs" / reauth_job_id / "reauth-sub2api.json").read_text(encoding="utf-8"))
                 assert_true("reauth_info" not in reauth_sub["accounts"][0]["credentials"], "reauth sub2api should omit reauth_info")
@@ -384,6 +388,10 @@ def main():
                     card_unchanged = json.loads(archive.read("batch@example.com.json").decode("utf-8"))
                 assert_true(card_refreshed["access_token"] == "access-reauthorized", "card CPA should contain the refreshed token")
                 assert_true(card_unchanged["access_token"] == "access", "card CPA should preserve non-target account tokens")
+                assert_true(
+                    card_refreshed["type"] == "codex" and card_unchanged["type"] == "codex",
+                    "card CPA should use codex type",
+                )
                 assert_true("reauth_info" not in card_refreshed and "reauth_info" not in card_unchanged, "card CPA should omit reauth_info")
                 card_sub = json.loads((Path(workspace) / "reauth_jobs" / reauth_job_id / "card-sub2api.json").read_text(encoding="utf-8"))
                 assert_true(len(card_sub["accounts"]) == 2, "card sub2api should contain all bound files")

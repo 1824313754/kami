@@ -2003,6 +2003,12 @@ def bound_files(db: Session, cdkey_ids: list[int]) -> list[FileRecord]:
     )
 
 
+def cpa_payload_for_export(payload: dict) -> dict:
+    exported = dict(payload)
+    exported["type"] = "codex"
+    return exported
+
+
 def zip_for_files(db: Session, files: list[FileRecord]) -> bytes:
     if not files:
         raise BusinessError("当前没有可下载文件")
@@ -2017,6 +2023,7 @@ def zip_for_files(db: Session, files: list[FileRecord]) -> bytes:
             payload = payloads.get(record.id)
             if not payload:
                 raise BusinessError(f"账号字段内容不存在：{record.email_name}")
+            payload = cpa_payload_for_export(payload)
             archive.writestr(f"{safe_name(record.email_name)}.json", json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
     return buffer.getvalue()
 
