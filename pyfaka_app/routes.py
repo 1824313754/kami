@@ -10,6 +10,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from io import BytesIO
+from ipaddress import ip_address
 from secrets import token_urlsafe
 from threading import Lock, RLock, Thread
 from types import SimpleNamespace
@@ -36,6 +37,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from .cdkey_password import CARD_ACCESS_HOURS, PASSWORD_FAILURE_LIMIT, CdkeyPasswordError, cdkey_access_deadline, cdkey_access_expired, decrypt_cdkey_password, password_cipher, validate_cdkey_password, verify_cdkey_password
 from .database import DATA_DIR, SessionLocal
 from .models import AdminUser, AuditLog, Cdkey, CdkeyBatch, FileRecord, FileRecordPayload, UploadBatch, UploadResult
 from .services import (
@@ -132,6 +134,15 @@ QUERY_ACCESS_JOB_SESSION_KEY = "query_access_job_id"
 QUERY_ACCESS_CDKEY_IDS_SESSION_KEY = "query_access_cdkey_ids"
 QUERY_REAUTH_TOKEN_SESSION_KEY = "query_reauth_token"
 QUERY_REAUTH_JOB_SESSION_KEY = "query_reauth_job_id"
+QUERY_PASSWORD_GUARD_LOCK = Lock()
+QUERY_PASSWORD_JOB_SESSION_KEY = "query_password_job_id"
+QUERY_REAUTH_PASSWORD_JOB_SESSION_KEY = "query_reauth_password_job_id"
+QUERY_PASSWORD_VERSIONS_SESSION_KEY = "query_password_versions"
+QUERY_REAUTH_PASSWORD_VERSIONS_SESSION_KEY = "query_reauth_password_versions"
+QUERY_PASSWORD_HINT_DEFAULTS = {
+    "query_password_setup_hint": "首次提取时，此密码将绑定本次卡密；已设置过请填写当前绑定的密码，管理员修改后请使用新密码。多张卡密需使用同一密码，密码不同请分开操作。请勿与链动小铺的联系方式或安全密码相同。丢失密码请联系 QQ：3510485065，或加入 QQ 群：730441960。",
+    "query_password_verify_hint": "请输入该卡密当前绑定的密码，管理员修改后请使用新密码。多张卡密需使用同一密码，密码不同请分开操作。未设置密码请先到卡密提取模块设置。丢失密码请联系 QQ：3510485065，或加入 QQ 群：730441960。",
+}
 ACTIVE_JOB_TIMEOUT_SECONDS = {
     "query_access": 1800,
     "file_live_check": 1800,
@@ -350,6 +361,65 @@ def clear_query_invalid_attempts(ip: str) -> None:
     QUERY_FAILURES.pop(query_lock_key(ip), None)
 
 
+def password_ip_key() -> str:
+    peer = request.remote_addr or ""
+    trusted = {value.strip() for value in os.environ.get("PYFAKA_TRUSTED_PROXY_IPS", "").split(",") if value.strip()}
+    if peer in trusted:
+        # A trusted single-hop proxy must append or overwrite the client address.
+        forwarded = request.headers.get("X-Forwarded-For", "").split(",")[-1].strip()
+        try:
+            peer = str(ip_address(forwarded))
+        except ValueError:
+            pass
+    return f"cdkey-password-ip:{peer}"
+
+
+def query_password_preflight(payload: dict):
+    with QUERY_PASSWORD_GUARD_LOCK:
+        if query_lock_remaining(password_ip_key()) > 0:
+            return api_error("尝试失败次数过多，请 30 分钟后再试", 429, "PASSWORD_IP_LOCKED")
+        if rate_limited(password_ip_key(), 60, 60):
+            return api_error("请求过于频繁，请稍后再试", 429, "RATE_LIMITED")
+    try:
+        validate_cdkey_password(payload.get("password"))
+    except CdkeyPasswordError as exc:
+        return api_error(str(exc), exc.status, exc.code)
+    return None
+
+
+def password_failure_response():
+    with QUERY_PASSWORD_GUARD_LOCK:
+        locked = record_query_invalid_attempt(password_ip_key())
+    if locked:
+        return api_error("尝试失败次数过多，请 30 分钟后再试", 429, "PASSWORD_IP_LOCKED")
+    return api_error("卡密或提取密码不正确", 403, "PASSWORD_INCORRECT")
+
+
+def require_cdkey_password(cdkeys: list[Cdkey], payload: dict, *, allow_setup: bool = False):
+    try:
+        g.query_verified_password_versions = verify_cdkey_password(db(), cdkeys, payload.get("password"), secret_key=current_app.secret_key, allow_setup=allow_setup)
+    except CdkeyPasswordError as exc:
+        if exc.code == "PASSWORD_INCORRECT":
+            return password_failure_response()
+        return api_error(str(exc), exc.status, exc.code)
+    return None
+
+
+def query_cards_unlocked(ids: list[int], versions_key: str) -> bool:
+    versions = session.get(versions_key)
+    if not ids or not isinstance(versions, dict):
+        return False
+    cards = db().query(Cdkey).filter(
+        Cdkey.id.in_(ids), Cdkey.access_password_hash.is_not(None),
+        Cdkey.access_password_failures < PASSWORD_FAILURE_LIMIT,
+        Cdkey.access_admin_locked.is_(False),
+    ).all()
+    return len(cards) == len(set(ids)) and all(
+        not cdkey_access_expired(card) and versions.get(str(card.id)) == card.access_password_version
+        for card in cards
+    )
+
+
 def session_int_list(key: str) -> list[int]:
     values = session.get(key) or []
     if not isinstance(values, list):
@@ -368,25 +438,27 @@ def issue_query_access(job_id: str, cdkey_ids: list[int] | None = None) -> str:
     session.permanent = True
     session[QUERY_ACCESS_JOB_SESSION_KEY] = job_id
     session[QUERY_ACCESS_TOKEN_SESSION_KEY] = token
+    session[QUERY_PASSWORD_JOB_SESSION_KEY] = job_id
+    session[QUERY_PASSWORD_VERSIONS_SESSION_KEY] = dict(g.query_verified_password_versions)
     if cdkey_ids is not None:
         session[QUERY_ACCESS_CDKEY_IDS_SESSION_KEY] = list(dict.fromkeys(int(item) for item in cdkey_ids if item))
     return token
 
 
 def query_access_allowed(job_id: str, token: str | None = None) -> bool:
-    if session.get(QUERY_ACCESS_JOB_SESSION_KEY) != job_id:
+    if (session.get(QUERY_ACCESS_JOB_SESSION_KEY) != job_id
+            or session.get(QUERY_PASSWORD_JOB_SESSION_KEY) != job_id
+            or not session_int_list(QUERY_ACCESS_CDKEY_IDS_SESSION_KEY)):
         return False
     expected = session.get(QUERY_ACCESS_TOKEN_SESSION_KEY)
     if token is None:
         token = request.args.get("token") or request.headers.get("X-Query-Token")
-    return bool(expected and token and expected == token)
+    return bool(expected and token and expected == token
+                and query_cards_unlocked(session_int_list(QUERY_ACCESS_CDKEY_IDS_SESSION_KEY), QUERY_PASSWORD_VERSIONS_SESSION_KEY))
 
 
 def authorize_query_job(job_id: str) -> bool:
-    return query_access_allowed(job_id) or (
-        not session.get(QUERY_ACCESS_TOKEN_SESSION_KEY)
-        and (session.get("query_pending_job_id") == job_id or session.get("query_job_id") == job_id)
-    )
+    return query_access_allowed(job_id)
 
 
 def query_token_from_payload(payload: dict) -> str:
@@ -398,6 +470,8 @@ def issue_query_reauth_access(job_id: str) -> str:
     session.permanent = True
     session[QUERY_REAUTH_JOB_SESSION_KEY] = job_id
     session[QUERY_REAUTH_TOKEN_SESSION_KEY] = token
+    session[QUERY_REAUTH_PASSWORD_JOB_SESSION_KEY] = job_id
+    session[QUERY_REAUTH_PASSWORD_VERSIONS_SESSION_KEY] = dict(g.query_verified_password_versions)
     return token
 
 
@@ -1196,11 +1270,21 @@ def file_item_payload(item: FileRecord) -> dict:
 
 
 def cdkey_item_payload(item: Cdkey) -> dict:
+    expiry_locked = cdkey_access_expired(item)
+    password_locked = item.access_password_failures >= PASSWORD_FAILURE_LIMIT
     return {
         "id": item.id,
         "code": item.code,
         "extract_status": item.extract_status,
         "extract_status_text": cdkey_status_text(item.extract_status),
+        "password_set": bool(item.access_password_hash),
+        "password_recorded": bool(item.access_password_ciphertext),
+        "password_failures": item.access_password_failures,
+        "password_locked": password_locked,
+        "admin_locked": item.access_admin_locked,
+        "access_locked": expiry_locked or password_locked or item.access_admin_locked,
+        "expiry_locked": expiry_locked,
+        "access_expires_at": format_time_text(cdkey_access_deadline(item)),
         "files_per_key": item.files_per_key,
         "extraction_no": item.extraction_no or "",
         "batch_id": item.batch.id if item.batch else None,
@@ -1371,6 +1455,11 @@ def user_row_payload(item: AdminUser) -> dict:
     }
 
 
+def query_password_hints(session_db) -> dict:
+    return {key: get_setting(session_db, key, default).strip() or default
+            for key, default in QUERY_PASSWORD_HINT_DEFAULTS.items()}
+
+
 def settings_payload(session_db) -> dict:
     return {
         "live_check_timeout": get_setting(session_db, LIVE_CHECK_TIMEOUT_KEY, "10"),
@@ -1378,6 +1467,7 @@ def settings_payload(session_db) -> dict:
         "unshippable_http_statuses": list(unshippable_http_statuses(session_db)),
         "task_workers": get_setting(session_db, TASK_WORKERS_KEY, str(DEFAULT_LIVE_CHECK_WORKERS)),
         "query_totp_enabled": query_totp_enabled(session_db),
+        **query_password_hints(session_db),
         "business_type_options": business_type_options(),
     }
 
@@ -2009,6 +2099,8 @@ def scoped_query_cdkey_ids(job: dict) -> list[int] | None:
 
 
 def public_query_job_payload(job: dict) -> dict:
+    if job.get("kind") == "query_reauth":
+        return job
     scoped_ids = scoped_query_cdkey_ids(job)
     if scoped_ids is None:
         return job
@@ -2016,8 +2108,11 @@ def public_query_job_payload(job: dict) -> dict:
     if job_ids and set(job_ids).issubset(set(scoped_ids)):
         return job
     scoped = dict(job)
-    if scoped.get("events"):
-        scoped["events"] = list(scoped["events"])
+    # Shared tasks may contain events and errors about unverified cards.
+    scoped["events"] = []
+    scoped["phase"] = "提取完成" if scoped.get("status") == "done" else "正在处理本次提取任务"
+    if scoped.get("error"):
+        scoped["error"] = "提取任务失败，请重新提交当前卡密查询"
     rows = db().query(Cdkey).filter(Cdkey.id.in_(scoped_ids)).all() if scoped_ids else []
     by_id = {int(item.id): item for item in rows}
     cdkeys = [by_id[item_id] for item_id in scoped_ids if item_id in by_id]
@@ -2065,6 +2160,7 @@ def query_session_payload() -> dict:
     return {
         "inventory": public_inventory(),
         "totp_enabled": query_totp_enabled(db()),
+        "password_hints": query_password_hints(db()),
         "pending_job_id": session.get("query_pending_job_id"),
         "job_id": session.get("query_job_id"),
         "cdkey_ids": session_int_list("query_cdkey_ids"),
@@ -3016,7 +3112,11 @@ def _reauth_credential(payload: dict) -> dict:
 def _reauth_account_deactivated(exc: Exception) -> bool:
     from .reauth.oauth_client.auth_flow import EmailOtpValidationError
 
-    return isinstance(exc, EmailOtpValidationError) and exc.status_code == 403
+    return (
+        isinstance(exc, EmailOtpValidationError)
+        and exc.status_code == 403
+        and exc.error_code == "account_deactivated"
+    )
 
 
 def _reauth_rate_limited(exc: Exception) -> bool:
@@ -3084,9 +3184,15 @@ def _persist_reauth_block(session_db, file_record_id: int, reason: str) -> None:
 
 
 def _reauth_public_error(exc: Exception) -> str:
+    from .reauth.oauth_client.auth_flow import EmailOtpValidationError
+
     block_reason = _reauth_block_reason_for_exception(exc)
     if block_reason:
         return _reauth_block_label(block_reason)
+    if isinstance(exc, EmailOtpValidationError):
+        if exc.status_code == 403 and exc.error_code == "incorrect_code":
+            return "2FA 已被修改，请更新 2FA 密钥后重试"
+        return "2FA 验证失败，请检查密钥和服务器时间"
     text = str(exc or "")
     for marker, message in (
         ("尚未导入", "账号尚未导入密码和 2FA 密钥"),
@@ -3793,6 +3899,86 @@ def api_cdkeys():
             "total_bindable_files": capacity.total_bindable_files,
         } if capacity else None),
     })
+
+
+@bp.post("/api/admin/cdkeys/<int:cdkey_id>/password")
+@api_login_required
+@api_admin_required
+def api_view_cdkey_password(cdkey_id: int):
+    card = db().get(Cdkey, cdkey_id)
+    if not card:
+        return api_error("卡密不存在", 404, "CDKEY_NOT_FOUND")
+    if not card.access_password_ciphertext:
+        return api_error("该卡密尚无可查看的提取密码记录", 409, "PASSWORD_NOT_RECORDED")
+    try:
+        password = decrypt_cdkey_password(card.access_password_ciphertext, current_app.secret_key)
+    except CdkeyPasswordError as exc:
+        return api_error(str(exc), exc.status, exc.code)
+    log_audit("VIEW_CDKEY_PASSWORD", "cdkey", cdkey_id, "view extraction password")
+    response = jsonify({"ok": True, "password": password})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@bp.post("/api/admin/cdkeys/<int:cdkey_id>/change-password")
+@api_login_required
+@api_admin_required
+def api_change_cdkey_password(cdkey_id: int):
+    password = json_payload().get("password")
+    try:
+        validate_cdkey_password(password)
+    except CdkeyPasswordError as exc:
+        return api_error(str(exc), exc.status, exc.code)
+    card = db().get(Cdkey, cdkey_id)
+    if not card:
+        return api_error("卡密不存在", 404, "CDKEY_NOT_FOUND")
+    if not card.access_password_hash:
+        return api_error("该卡密尚未绑定提取密码", 409, "PASSWORD_NOT_SET")
+    password_hash = generate_password_hash(password)
+    ciphertext = password_cipher(current_app.secret_key).encrypt(password.encode("utf-8")).decode("ascii")
+    db().query(Cdkey).filter(Cdkey.id == cdkey_id).update({
+        Cdkey.access_password_hash: password_hash,
+        Cdkey.access_password_ciphertext: ciphertext,
+        Cdkey.access_password_version: Cdkey.access_password_version + 1,
+    }, synchronize_session=False)
+    log_audit("CHANGE_CDKEY_PASSWORD", "cdkey", cdkey_id, "changed extraction password; previous guest credentials revoked")
+    return api_ok({"message": "提取密码已修改，用户需重新输入卡密和新密码；锁定状态和使用期限保持不变"})
+
+
+@bp.post("/api/admin/cdkeys/<int:cdkey_id>/lock")
+@api_login_required
+@api_admin_required
+def api_lock_cdkey(cdkey_id: int):
+    if not db().get(Cdkey, cdkey_id):
+        return api_error("卡密不存在", 404, "CDKEY_NOT_FOUND")
+    db().query(Cdkey).filter(Cdkey.id == cdkey_id).update({
+        Cdkey.access_admin_locked: True,
+        Cdkey.access_password_version: Cdkey.access_password_version + 1,
+    }, synchronize_session=False)
+    log_audit("LOCK_CDKEY", "cdkey", cdkey_id, "admin locked card; previous guest credentials revoked")
+    return api_ok({"message": "卡密已锁定，提取、重新授权、2FA 验证码及游客下载已停用"})
+
+
+@bp.post("/api/admin/cdkeys/<int:cdkey_id>/unlock-password")
+@api_login_required
+@api_admin_required
+def api_unlock_cdkey_password(cdkey_id: int):
+    card = db().get(Cdkey, cdkey_id)
+    if not card:
+        return api_error("卡密不存在", 404, "CDKEY_NOT_FOUND")
+    # Serialize with password checks before clearing the current locks.
+    db().query(Cdkey).filter(Cdkey.id == cdkey_id).update(
+        {Cdkey.access_password_failures: 0, Cdkey.access_admin_locked: False}, synchronize_session=False,
+    )
+    db().refresh(card, with_for_update=True)
+    if card.extracted_at is not None:
+        card.access_unlocked_until = datetime.now() + timedelta(hours=CARD_ACCESS_HOURS)
+    deadline = format_time_text(cdkey_access_deadline(card))
+    log_audit("UNLOCK_CDKEY_PASSWORD", "cdkey", cdkey_id, f"clear admin lock and password failure count; access_expires_at={deadline}; password and first extraction time unchanged")
+    message = "卡密已解锁，请使用当前绑定的提取密码"
+    if card.extracted_at is not None:
+        message += f"；可使用至 {deadline}，到期后再次锁定"
+    return api_ok({"message": message, "access_expires_at": deadline})
 
 
 @bp.get("/api/admin/cdkeys/<int:cdkey_id>")
@@ -4613,6 +4799,12 @@ def api_delete_user(user_id: int):
 def api_update_settings():
     payload = json_payload()
     session_db = db()
+    password_hints = query_password_hints(session_db)
+    for key, default in QUERY_PASSWORD_HINT_DEFAULTS.items():
+        if key in payload:
+            if not isinstance(payload[key], str):
+                return api_error("密码提示必须是文字", 400, "PASSWORD_HINT_INVALID")
+            password_hints[key] = payload[key].strip() or default
     live_check_timeout = str(max(1, parse_int(payload.get("live_check_timeout"), 10) or 10))
     live_check_user_agent = str(payload.get("live_check_user_agent") or "").strip() or "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
     raw_unshippable_http_statuses = payload.get(
@@ -4637,8 +4829,10 @@ def api_update_settings():
     set_setting(session_db, TASK_WORKERS_KEY, task_workers_value)
     set_setting(session_db, QUERY_TOTP_ENABLED_KEY, query_totp_enabled_value)
     set_setting(session_db, BUSINESS_TYPES_SETTING_KEY, business_types_value)
+    for key, value in password_hints.items():
+        set_setting(session_db, key, value)
     session[POOL_BUSINESS_SESSION_KEY] = normalize_active_business_type(session.get(POOL_BUSINESS_SESSION_KEY))
-    log_audit("UPDATE_SETTINGS", "app_setting", "local", f"live_check_timeout={live_check_timeout}, unshippable_http_statuses={list(unshippable_statuses_value)}, task_workers={task_workers_value}, query_totp_enabled={query_totp_enabled_value}, business_types=updated")
+    log_audit("UPDATE_SETTINGS", "app_setting", "local", f"live_check_timeout={live_check_timeout}, unshippable_http_statuses={list(unshippable_statuses_value)}, task_workers={task_workers_value}, query_totp_enabled={query_totp_enabled_value}, business_types=updated, password_hints=updated")
     return api_ok({"message": "系统设置已保存。", "settings": settings_payload(session_db), "session": session_payload(current_user())})
 
 
@@ -4649,7 +4843,7 @@ def api_query_session():
 
 @bp.get("/api/query/stock")
 def api_query_stock():
-    return api_ok({"inventory": public_inventory()})
+    return api_ok({"inventory": public_inventory(), "password_hints": query_password_hints(db())})
 
 
 @bp.post("/api/query/2fa/accounts")
@@ -4657,6 +4851,9 @@ def api_query_totp_accounts():
     if not query_totp_enabled(db()):
         return api_error("2FA 验证码功能未开启", 403, "TOTP_LOOKUP_DISABLED")
     payload = json_payload()
+    password_error = query_password_preflight(payload)
+    if password_error is not None:
+        return password_error
     ip = client_ip()
     locked_seconds = query_lock_remaining(ip)
     if locked_seconds > 0:
@@ -4669,8 +4866,10 @@ def api_query_totp_accounts():
         return api_error("请输入卡密")
     cdkey = db().query(Cdkey).filter(Cdkey.code == code).first()
     if not cdkey:
-        record_query_invalid_attempt(ip)
-        return api_error("卡密无效或不可用", 404, "CDKEY_NOT_FOUND")
+        return password_failure_response()
+    password_error = require_cdkey_password([cdkey], payload)
+    if password_error is not None:
+        return password_error
     records = bound_files(db(), [int(cdkey.id)])
     accounts = sorted({
         str(record.email_name or "").strip().lower()
@@ -4689,6 +4888,9 @@ def api_query_totp_code():
     if not query_totp_enabled(db()):
         return api_error("2FA 验证码功能未开启", 403, "TOTP_LOOKUP_DISABLED")
     payload = json_payload()
+    password_error = query_password_preflight(payload)
+    if password_error is not None:
+        return password_error
     ip = client_ip()
     locked_seconds = query_lock_remaining(ip)
     if locked_seconds > 0:
@@ -4700,8 +4902,10 @@ def api_query_totp_code():
         return api_error("请输入卡密并选择邮箱")
     cdkey = db().query(Cdkey).filter(Cdkey.code == code).first()
     if not cdkey:
-        record_query_invalid_attempt(ip)
-        return api_error("卡密无效或不可用", 404, "CDKEY_NOT_FOUND")
+        return password_failure_response()
+    password_error = require_cdkey_password([cdkey], payload)
+    if password_error is not None:
+        return password_error
     record = (
         db().query(FileRecord)
         .options(joinedload(FileRecord.payload))
@@ -4741,6 +4945,9 @@ def api_query_totp_code():
 @bp.post("/api/query/access")
 def api_query_access():
     payload = json_payload()
+    password_error = query_password_preflight(payload)
+    if password_error is not None:
+        return password_error
     ip = client_ip()
     locked_seconds = query_lock_remaining(ip)
     if locked_seconds > 0:
@@ -4758,10 +4965,10 @@ def api_query_access():
     cdkey_by_code = {item.code: item for item in cdkeys}
     missing_codes = [code for code in unique_codes if code not in cdkey_by_code]
     if missing_codes:
-        locked_seconds = record_query_invalid_attempt(ip)
-        if locked_seconds:
-            return api_error("卡密无效或不可用，失败次数过多，已锁定 30 分钟", 401, "QUERY_INVALID")
-        return api_error("卡密无效或不可用", 401, "QUERY_INVALID")
+        return password_failure_response()
+    password_error = require_cdkey_password(cdkeys, payload, allow_setup=True)
+    if password_error is not None:
+        return password_error
     requested_cdkey_ids = [cdkey_by_code[code].id for code in unique_codes]
     checking_codes = [code for code in unique_codes if cdkey_by_code[code].extract_status == "CHECKING"]
     if checking_codes:
@@ -4909,12 +5116,7 @@ def api_query_result():
         session[QUERY_ACCESS_JOB_SESSION_KEY] = job_id
         session.pop("query_pending_job_id", None)
     else:
-        if session.get(QUERY_ACCESS_TOKEN_SESSION_KEY):
-            return api_error("请先输入卡密", 403, "FORBIDDEN")
-        ids = session.get("query_cdkey_ids") or []
-        job_id = session.get("query_job_id")
-        with JOBS_LOCK:
-            job = EXTRACTION_JOBS.get(job_id) if job_id else None
+        return api_error("请先输入卡密和提取密码", 403, "FORBIDDEN")
     if not ids:
         return api_error("请先输入卡密", 403, "FORBIDDEN")
     cdkeys = db().query(Cdkey).filter(Cdkey.id.in_(ids)).all()
@@ -4942,6 +5144,8 @@ def api_query_result():
         })
     items = sort_items_by_quota_desc(items)
     reauth_job = latest_query_reauth_job(str(job_id or ""))
+    if reauth_job and not query_reauth_job_allowed(reauth_job, request.args.get("token") or request.headers.get("X-Query-Token")):
+        reauth_job = None
     return api_ok({
         "job_id": job_id,
         "job": public_query_job_payload(job) if job else {},
@@ -4963,15 +5167,23 @@ def query_reauth_job_allowed(job: dict | None, token: str | None = None) -> bool
         return False
     job_id = str(job.get("id") or "").strip()
     expected = session.get(QUERY_REAUTH_TOKEN_SESSION_KEY)
-    if job_id and session.get(QUERY_REAUTH_JOB_SESSION_KEY) == job_id and expected and token and expected == token:
-        return True
+    if (job_id and session.get(QUERY_REAUTH_JOB_SESSION_KEY) == job_id
+            and session.get(QUERY_REAUTH_PASSWORD_JOB_SESSION_KEY) == job_id
+            and expected and token and expected == token):
+        return query_cards_unlocked(query_job_cdkey_ids(job), QUERY_REAUTH_PASSWORD_VERSIONS_SESSION_KEY)
     source_job_id = str(job.get("source_job_id") or "").strip()
-    return bool(source_job_id and query_access_allowed(source_job_id, token))
+    job_ids = set(job.get("cdkey_ids") or [])
+    allowed_ids = set(session_int_list(QUERY_ACCESS_CDKEY_IDS_SESSION_KEY))
+    return bool(source_job_id and job_ids and job_ids.issubset(allowed_ids)
+                and query_access_allowed(source_job_id, token))
 
 
 @bp.post("/api/query/reauth")
 def api_query_reauth():
     payload = json_payload()
+    password_error = query_password_preflight(payload)
+    if password_error is not None:
+        return password_error
     ip = client_ip()
     if rate_limited(f"query-reauth:{ip}", QUERY_RATE_LIMIT, 600):
         return api_error("请求过于频繁，请稍后再试", 429, "RATE_LIMITED")
@@ -4987,9 +5199,10 @@ def api_query_reauth():
     cdkeys_by_code = {str(item.code or "").strip(): item for item in cdkeys}
     missing_codes = [code for code in codes if code not in cdkeys_by_code]
     if missing_codes:
-        preview = "、".join(missing_codes[:5])
-        suffix = f" 等 {len(missing_codes)} 张" if len(missing_codes) > 5 else ""
-        return api_error(f"卡密不存在：{preview}{suffix}", 404, "CDKEY_NOT_FOUND")
+        return password_failure_response()
+    password_error = require_cdkey_password(cdkeys, payload)
+    if password_error is not None:
+        return password_error
     cdkey_ids = [int(cdkeys_by_code[code].id) for code in codes]
     card_records = bound_files(db(), cdkey_ids)
     download_file_ids = [int(record.id) for record in card_records]
@@ -4997,6 +5210,8 @@ def api_query_reauth():
         return api_error("当前卡密没有可测活文件", 409, "NO_FILES")
     existing_reauth_job = find_running_query_reauth_job_for_cdkeys(cdkey_ids)
     if existing_reauth_job:
+        if set(existing_reauth_job.get("cdkey_ids") or []) != set(cdkey_ids):
+            return api_error("部分卡密正在其他批次重新授权，请等待任务完成", 409, "REAUTH_SCOPE_BUSY")
         existing_job_id = str(existing_reauth_job.get("id") or "")
         access_token = issue_query_reauth_access(existing_job_id)
         return api_ok({
@@ -5038,6 +5253,8 @@ def api_query_reauth():
     }
     existing_reauth_job = register_job(reauth_job, exclusive_cdkey_ids=cdkey_ids)
     if existing_reauth_job:
+        if set(existing_reauth_job.get("cdkey_ids") or []) != set(cdkey_ids):
+            return api_error("部分卡密正在其他批次重新授权，请等待任务完成", 409, "REAUTH_SCOPE_BUSY")
         existing_job_id = str(existing_reauth_job.get("id") or "")
         access_token = issue_query_reauth_access(existing_job_id)
         return api_ok({

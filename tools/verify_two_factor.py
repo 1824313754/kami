@@ -114,8 +114,28 @@ def check_mfa():
         flow._complete_totp_login_step(step)
     except EmailOtpValidationError as exc:
         assert exc.status_code == 403
+        assert routes._reauth_block_reason_for_exception(exc) == "", "unclassified 403 must not ban the account"
     else:
         raise AssertionError("rejected MFA was accepted")
+    for status, error, expected_message, expected_block in [
+        (403, {"message": "Incorrect code", "type": "invalid_request_error", "param": None, "code": "incorrect_code"}, "2FA 已被修改，请更新 2FA 密钥后重试", ""),
+        (403, {"code": "account_deactivated"}, "账户封禁", "account_deactivated"),
+        (403, {"code": "rate_limit_exceeded"}, "账户已被限流，5分钟后再重试", "rate_limit_exceeded"),
+        (403, {"code": "verification_failed"}, "2FA 验证失败，请检查密钥和服务器时间", ""),
+        (400, {"code": "verification_failed"}, "2FA 验证失败，请检查密钥和服务器时间", ""),
+    ]:
+        flow.session = SimpleNamespace(post=lambda url, **_: SimpleNamespace(
+            status_code=status if url.endswith("/verify") else 200,
+            json=lambda: {"error": error},
+        ))
+        try:
+            flow._complete_totp_login_step(step)
+        except EmailOtpValidationError as exc:
+            assert routes._reauth_public_error(exc) == expected_message, (status, error, str(exc))
+            assert routes._reauth_block_reason_for_exception(exc) == expected_block
+            assert json.loads(exc.body)["error"] == error, "MFA error details must be preserved"
+        else:
+            raise AssertionError("rejected MFA was accepted")
     flow.session = SimpleNamespace(post=lambda url, **_: SimpleNamespace(status_code=429, json=lambda: {"error": {"code": "rate_limit_exceeded"}}))
     expect_error(lambda: flow._complete_totp_login_step(step), "rate_limit_exceeded")
 
@@ -130,8 +150,8 @@ def check_api_and_download():
     batch = CdkeyBatch(batch_no="two-factor", prefix="A", key_date="20260912", total_count=2, files_per_key=1, created_by=owner.id)
     db.add(batch)
     db.flush()
-    card = Cdkey(batch_id=batch.id, code="CARD-A", files_per_key=1, extract_status="DONE")
-    other_card = Cdkey(batch_id=batch.id, code="CARD-B", files_per_key=1, extract_status="DONE")
+    card = Cdkey(batch_id=batch.id, code="CARD-A", files_per_key=1, extract_status="DONE", access_password_hash=generate_password_hash("Test12"))
+    other_card = Cdkey(batch_id=batch.id, code="CARD-B", files_per_key=1, extract_status="DONE", access_password_hash=generate_password_hash("Test12"))
     db.add_all([card, other_card])
     db.flush()
 
@@ -186,13 +206,15 @@ def check_api_and_download():
     with guest.session_transaction() as session:
         session[routes.QUERY_ACCESS_JOB_SESSION_KEY] = job_id
         session[routes.QUERY_ACCESS_TOKEN_SESSION_KEY] = "guest-token"
+        session[routes.QUERY_PASSWORD_JOB_SESSION_KEY] = job_id
+        session[routes.QUERY_PASSWORD_VERSIONS_SESSION_KEY] = {str(card.id): 1}
         session[routes.QUERY_ACCESS_CDKEY_IDS_SESSION_KEY] = [card.id]
     url = f"/query/files/download-2fa?job_id={job_id}&token=guest-token"
     assert app.test_client().get(url).status_code == 403
     assert guest.get(url.replace("guest-token", "wrong-token")).status_code == 403
     txt = guest.get(url)
     assert txt.status_code == 200, txt.get_data(as_text=True)
-    assert txt.get_data(as_text=True) == f"mixed@example.com--account-password--{SECRET}\r\n"
+    assert txt.get_data(as_text=True) == f"mixed@example.com--p--{SECRET}\r\n"
     assert txt.headers["Cache-Control"] == "no-store"
     assert "attachment" in txt.headers["Content-Disposition"] and ".txt" in txt.headers["Content-Disposition"]
     assert "second-password" not in txt.get_data(as_text=True)
@@ -204,29 +226,35 @@ def check_api_and_download():
     db.commit()
 
     reauth_id = "two-factor-reauth"
-    routes.register_job({"id": reauth_id, "kind": "query_reauth", "status": "done", "reauth_ready": True, "successful_file_ids": [record.id], "download_file_ids": [record.id, second.id], "events": []})
+    routes.register_job({"id": reauth_id, "kind": "query_reauth", "status": "done", "reauth_ready": True, "successful_file_ids": [record.id], "download_file_ids": [record.id, second.id], "cdkey_ids": [card.id, other_card.id], "events": []})
     with guest.session_transaction() as session:
         session[routes.QUERY_REAUTH_JOB_SESSION_KEY] = reauth_id
         session[routes.QUERY_REAUTH_TOKEN_SESSION_KEY] = "reauth-token"
+        session[routes.QUERY_REAUTH_PASSWORD_JOB_SESSION_KEY] = reauth_id
+        session[routes.QUERY_REAUTH_PASSWORD_VERSIONS_SESSION_KEY] = {str(card.id): 1, str(other_card.id): 1}
     for kind, count in [("2fa", 1), ("card-2fa", 2)]:
         route = f"/api/query/reauth/{reauth_id}/download?format={kind}&token=reauth-token"
         assert app.test_client().get(route).status_code == 403
         result = guest.get(route)
         assert result.status_code == 200 and len(result.get_data(as_text=True).splitlines()) == count
-    routes.update_job(reauth_id, source_job_id=job_id)
+    routes.update_job(reauth_id, source_job_id=job_id, cdkey_ids=[card.id, other_card.id])
     scoped = guest.get(f"/api/query/reauth/{reauth_id}/download?format=card-2fa&token=guest-token")
-    assert scoped.status_code == 200 and len(scoped.get_data(as_text=True).splitlines()) == 1
-    assert "second-password" not in scoped.get_data(as_text=True)
+    assert scoped.status_code == 403, "one verified card must not authorize a shared reauth download"
+    with guest.session_transaction() as session:
+        session[routes.QUERY_ACCESS_CDKEY_IDS_SESSION_KEY] = [card.id, other_card.id]
+        session[routes.QUERY_PASSWORD_VERSIONS_SESSION_KEY] = {str(card.id): 1, str(other_card.id): 1}
+    scoped = guest.get(f"/api/query/reauth/{reauth_id}/download?format=card-2fa&token=guest-token")
+    assert scoped.status_code == 200 and len(scoped.get_data(as_text=True).splitlines()) == 2
     routes.QUERY_ATTEMPTS.clear()
-    accounts = guest.post("/api/query/2fa/accounts", json={"code": card.code})
+    accounts = guest.post("/api/query/2fa/accounts", json={"password": "Test12", "code": card.code})
     assert accounts.status_code == 200 and accounts.get_json()["accounts"] == ["mixed@example.com"]
     with patch("pyfaka_app.reauth.totp.time.time", return_value=59):
-        code = guest.post("/api/query/2fa/code", json={"code": card.code, "email": "MIXED@example.com"})
+        code = guest.post("/api/query/2fa/code", json={"password": "Test12", "code": card.code, "email": "MIXED@example.com"})
     assert code.status_code == 200 and code.get_json()["code"] == "287082"
     assert code.get_json()["password"] == "account-password"
     assert "second-password" not in code.get_data(as_text=True) and SECRET not in code.get_data(as_text=True)
     assert "account-password" not in accounts.get_data(as_text=True)
-    rejected = guest.post("/api/query/2fa/code", json={"code": card.code, "email": "second@example.com"})
+    rejected = guest.post("/api/query/2fa/code", json={"password": "Test12", "code": card.code, "email": "second@example.com"})
     assert rejected.status_code == 404 and "second-password" not in rejected.get_data(as_text=True)
     SessionLocal.remove()
 

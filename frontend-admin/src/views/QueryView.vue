@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CircleCheck, CloseBold, Download, Key, Message, RefreshRight, Search, VideoPause } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -13,6 +13,7 @@ const activeWorkflow = ref('extract')
 const loading = ref(false)
 const polling = ref(false)
 const totpEnabled = ref(false)
+const passwordHints = ref({})
 const stock = ref({ available_files: 0, by_business_type: {}, updated_at: '-' })
 const page = ref(1)
 const pageSize = ref(10)
@@ -230,7 +231,7 @@ function downloadZip() {
 
 function downloadTwoFactor() {
   if (!canDownload.value) return
-  runDownload('2FA TXT 下载', downloadQueryTwoFactor, 'accounts-2fa.txt')
+  runDownload('账密2FA文件下载', downloadQueryTwoFactor, 'accounts-2fa.txt')
 }
 
 function downloadSub() {
@@ -242,9 +243,9 @@ function downloadReauth(format) {
   if (!reauthDone.value || !reauth.value.job?.id) return
   const isCard = format.startsWith('card-')
   const kind = format.replace('card-', '')
-  const title = { cpa: 'CPA', sub2api: 'sub2api', '2fa': '2FA TXT' }[kind]
+  const title = { cpa: 'CPA', sub2api: 'sub2api', '2fa': '账密2FA文件' }[kind]
   const extension = { cpa: 'zip', sub2api: 'json', '2fa': 'txt' }[kind]
-  const label = `${isCard ? '原卡密最新' : '重登授权'} ${title} 下载`
+  const label = `${isCard ? '原卡密最新' : '401重新授权'} ${title} 下载`
   const fallback = `${format}.${extension}`
   runDownload(
     label,
@@ -266,6 +267,7 @@ async function loadStock() {
   try {
     const data = await fetchQueryStock()
     stock.value = data.inventory
+    passwordHints.value = data.password_hints || {}
   } catch (error) {
     showRequestError(error)
   }
@@ -304,12 +306,45 @@ function startTotpCooldown(seconds = 5) {
   }, 1000)
 }
 
+async function requestCardPassword(allowSetup = false) {
+  const hint = allowSetup
+        ? passwordHints.value.query_password_setup_hint || '首次提取时，此密码将绑定本次卡密；已设置过请填写当前绑定的密码，管理员修改后请使用新密码。多张卡密需使用同一密码，密码不同请分开操作。请勿与链动小铺的联系方式或安全密码相同。丢失密码请联系 QQ：3510485065，或加入 QQ 群：730441960。'
+        : passwordHints.value.query_password_verify_hint || '请输入该卡密当前绑定的密码，管理员修改后请使用新密码。多张卡密需使用同一密码，密码不同请分开操作。未设置密码请先到卡密提取模块设置。丢失密码请联系 QQ：3510485065，或加入 QQ 群：730441960。'
+  const warning = '请勿与链动小铺的联系方式或安全密码相同'
+  const message = hint.split(warning).flatMap((text, index) =>
+    index ? [h('strong', { class: 'query-password-warning' }, warning), text] : [text],
+  )
+  try {
+    const { value } = await ElMessageBox.prompt(
+      h('div', { class: 'query-password-hint' }, message),
+      allowSetup ? '设置或验证提取密码' : '验证提取密码',
+      {
+        inputType: 'password',
+        inputPlaceholder: '至少 6 位，包含英文字母和数字',
+        inputPattern: /^(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]{6,}$/,
+        inputErrorMessage: '请输入至少 6 位英文字母和数字，且两者都要包含',
+        customClass: 'query-password-dialog',
+        confirmButtonText: '确认并继续',
+        cancelButtonText: '取消',
+        closeOnClickModal: false,
+      },
+    )
+    return value
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return null
+    throw error
+  }
+}
+
 async function loadTotpAccounts() {
   const code = form.totp_cdkey.trim()
   if (!code || totpAccountsLoading.value) return
   totpAccountsLoading.value = true
   try {
-    const data = await fetchQueryTotpAccounts({ code })
+    const password = await requestCardPassword()
+    if (password === null || form.totp_cdkey.trim() !== code) return
+    const data = await fetchQueryTotpAccounts({ code, password })
+    if (form.totp_cdkey.trim() !== code) return
     totpLookup.loadedCode = code
     totpLookup.accounts = data.accounts || []
     totpLookup.password = ''
@@ -336,9 +371,12 @@ async function loadTotpCode() {
   const selectedCode = totpLookup.loadedCode
   const selectedEmail = form.totp_email
   try {
+    const password = await requestCardPassword()
+    if (password === null || totpLookup.loadedCode !== selectedCode || form.totp_email !== selectedEmail) return
     const data = await fetchQueryTotpCode({
       code: selectedCode,
       email: selectedEmail,
+      password,
     })
     if (totpLookup.loadedCode !== selectedCode || form.totp_email !== selectedEmail) return
     totpLookup.password = data.password || ''
@@ -398,7 +436,7 @@ async function pollReauth(jobId) {
       reauthStopping.value = false
       stopReauthPolling()
       if (data.job?.status === 'done') {
-        ElMessage.success('重登授权完成，成功结果已回写')
+        ElMessage.success('401重新授权完成，成功结果已回写')
       }
       return
     }
@@ -412,14 +450,18 @@ async function pollReauth(jobId) {
 
 async function handleReauth() {
   if (!form.reauth_codes.trim() || reauthRunning.value) return
+  const codes = form.reauth_codes
   activeWorkflow.value = 'oauth'
-  reauthStopping.value = false
-  reauthLiveCheckPage.value = 1
-  stopReauthPolling()
   try {
+    const password = await requestCardPassword()
+    if (password === null) return
+    reauthStopping.value = false
+    reauthLiveCheckPage.value = 1
+    stopReauthPolling()
     const data = await startQueryReauth({
-      codes: form.reauth_codes,
+      codes,
       workers: form.reauth_workers,
+      password,
     })
     reauth.value = {
       job: {
@@ -438,7 +480,7 @@ async function handleReauth() {
       name: 'query',
       query: { ...route.query, reauth_job_id: data.job_id, reauth_token: data.access_token },
     })
-    ElMessage.success(data.reused ? '已回到正在运行的重登授权任务' : '重登授权已开始')
+    ElMessage.success(data.reused ? '已回到正在运行的401重新授权任务' : '401重新授权已开始')
   } catch (error) {
     showRequestError(error)
   }
@@ -448,7 +490,7 @@ async function handleStopReauth() {
   if (!reauthRunning.value || reauthStopping.value || reauth.value.job?.cancel_requested) return
   try {
     await ElMessageBox.confirm(
-      '确认停止当前重登授权任务？正在执行的账号会完成当前步骤，其余账号不再启动。',
+      '确认停止当前401重新授权任务？正在执行的账号会完成当前步骤，其余账号不再启动。',
       '停止任务',
       { type: 'warning' },
     )
@@ -540,10 +582,14 @@ async function syncJobState(jobId) {
 }
 
 async function handleSubmit() {
+  if (!form.code.trim() || loading.value) return
+  const code = form.code
   activeWorkflow.value = 'extract'
   loading.value = true
   try {
-    const data = await submitQueryAccess(form)
+    const password = await requestCardPassword(true)
+    if (password === null) return
+    const data = await submitQueryAccess({ code, password, live_check: form.live_check })
     resetResultState()
     await router.replace({
       name: 'query',
@@ -625,6 +671,7 @@ onMounted(async () => {
     const data = await fetchQuerySession()
     stock.value = data.inventory
     totpEnabled.value = data.totp_enabled === true
+    passwordHints.value = data.password_hints || {}
     if (!totpEnabled.value && activeWorkflow.value === 'totp') activeWorkflow.value = 'extract'
     startStockPolling()
   } catch (error) {
@@ -660,12 +707,17 @@ onBeforeUnmount(() => {
     <main class="query-workspace">
       <el-alert
         class="query-retention-notice"
-        title="卡密信息将在提取 24 小时后删除"
-        description="请及时下载并妥善保存 2FA 文件。"
+        title="使用须知"
         type="warning"
         show-icon
         :closable="false"
-      />
+      >
+        <template #default>
+          <span class="query-notice-line">首次提取设置至少 6 位字母数字组合密码，三个模块共用。<strong class="query-notice-warning">请勿与链动小铺的联系方式或安全密码相同。</strong></span>
+          <span class="query-notice-line">累计输错 10 次或首次成功提取满 24 小时即锁定全部功能，管理员解锁后再用 24 小时。</span>
+          <span class="query-notice-line">忘记密码 / 解锁：QQ 3510485065 · QQ 群 730441960。</span>
+        </template>
+      </el-alert>
       <el-tabs v-model="activeWorkflow" class="query-workflow-tabs">
         <el-tab-pane name="extract">
           <template #label>
@@ -717,7 +769,7 @@ onBeforeUnmount(() => {
                     <el-button :icon="CloseBold" @click="backToInput">清除结果</el-button>
                     <el-button v-if="canDownload" :icon="Download" plain @click="downloadZip">CPA 压缩包</el-button>
                     <el-button v-if="canDownload" type="primary" :icon="Download" @click="downloadSub">sub2api JSON</el-button>
-                    <el-button v-if="canDownload" type="warning" size="large" class="query-2fa-download" :icon="Download" @click="downloadTwoFactor">下载 2FA 文件</el-button>
+                    <el-button v-if="canDownload" type="warning" size="large" class="query-2fa-download" :icon="Download" @click="downloadTwoFactor">下载账密2FA文件</el-button>
                   </div>
                 </div>
 
@@ -772,7 +824,7 @@ onBeforeUnmount(() => {
           <template #label>
             <span class="query-tab-label">
               <el-icon><RefreshRight /></el-icon>
-              重登授权
+              401重新授权
               <i v-if="hasReauthJob" :class="{ 'is-done': reauthDone, 'is-error': reauth.job?.status === 'error' }" />
             </span>
           </template>
@@ -781,7 +833,7 @@ onBeforeUnmount(() => {
             <el-form label-position="top" class="query-operation-form">
               <div class="query-section-heading">
                 <div>
-                  <span>重登授权</span>
+                  <span>401重新授权</span>
                   <h2>提交卡密</h2>
                 </div>
                 <strong class="query-state" :class="{ 'is-running': reauthRunning, 'is-done': reauthDone, 'is-error': reauth.job?.status === 'error' }">
@@ -805,7 +857,7 @@ onBeforeUnmount(() => {
                   :disabled="!form.reauth_codes.trim() || reauthRunning"
                   @click="handleReauth"
                 >
-                  开始重登授权
+                  开始401重新授权
                 </el-button>
               </div>
             </el-form>
@@ -813,7 +865,7 @@ onBeforeUnmount(() => {
             <section v-if="reauth.job" class="query-task-section">
               <div class="query-task-heading">
                 <div>
-                  <span>重登授权任务</span>
+                  <span>401重新授权任务</span>
                   <h2>{{ reauth.job.phase || '等待开始' }}</h2>
                 </div>
                 <div class="query-task-actions">
@@ -851,17 +903,17 @@ onBeforeUnmount(() => {
                 <span>成功 {{ reauth.job.success || 0 }} · 失败 {{ reauth.job.failure || 0 }}</span>
               </div>
 
-              <el-alert v-if="reauth.job.status === 'error'" :title="reauth.job.error || '重登授权失败'" type="error" show-icon :closable="false" />
+              <el-alert v-if="reauth.job.status === 'error'" :title="reauth.job.error || '401重新授权失败'" type="error" show-icon :closable="false" />
 
               <div v-if="reauthDone" class="query-download-groups">
                 <div class="query-download-group">
                   <div>
                     <CircleCheck />
-                    <span>本次重登授权成功文件</span>
+                    <span>本次401重新授权成功文件</span>
                   </div>
                   <el-button :icon="Download" plain @click="downloadReauth('cpa')">CPA ZIP</el-button>
                   <el-button type="primary" :icon="Download" @click="downloadReauth('sub2api')">sub2api JSON</el-button>
-                  <el-button type="warning" size="large" class="query-2fa-download" :icon="Download" @click="downloadReauth('2fa')">下载 2FA 文件</el-button>
+                  <el-button type="warning" size="large" class="query-2fa-download" :icon="Download" @click="downloadReauth('2fa')">下载账密2FA文件</el-button>
                 </div>
                 <div class="query-download-group">
                   <div>
@@ -870,7 +922,7 @@ onBeforeUnmount(() => {
                   </div>
                   <el-button :icon="Download" plain @click="downloadReauth('card-cpa')">CPA ZIP</el-button>
                   <el-button :icon="Download" @click="downloadReauth('card-sub2api')">sub2api JSON</el-button>
-                  <el-button type="warning" size="large" class="query-2fa-download" :icon="Download" @click="downloadReauth('card-2fa')">下载 2FA 文件</el-button>
+                  <el-button type="warning" size="large" class="query-2fa-download" :icon="Download" @click="downloadReauth('card-2fa')">下载账密2FA文件</el-button>
                 </div>
               </div>
 
@@ -1071,6 +1123,16 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
+.query-notice-line {
+  display: block;
+  line-height: 1.7;
+}
+
+.query-notice-warning {
+  color: #c62828;
+  font-weight: 700;
+}
+
 .query-2fa-download :deep(svg) {
   color: inherit;
 }
@@ -1099,5 +1161,38 @@ onBeforeUnmount(() => {
 .query-totp-help {
   --el-color-info: #334155;
   grid-column: 1 / -1;
+}
+</style>
+
+<style>
+.el-message-box.query-password-dialog {
+  --el-messagebox-width: 600px;
+  --el-messagebox-font-size: 22px;
+  --el-messagebox-content-font-size: 17px;
+  --el-messagebox-error-font-size: 14px;
+  --el-messagebox-padding-primary: 24px;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+}
+
+.query-password-dialog .query-password-hint {
+  white-space: pre-wrap;
+  line-height: 1.8;
+}
+
+.query-password-dialog .query-password-warning {
+  color: #c62828;
+  font-weight: 700;
+}
+
+.query-password-dialog .el-input {
+  --el-input-height: 44px;
+  --el-input-font-size: 18px;
+}
+
+.query-password-dialog .el-button {
+  min-height: 40px;
+  padding: 10px 20px;
+  font-size: 16px;
 }
 </style>

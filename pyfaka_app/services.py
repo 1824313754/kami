@@ -2088,22 +2088,9 @@ def cleanup_expired_extracted_cdkeys(
     expire_after_hours: int = 24,
     workers: int = DEFAULT_LIVE_CHECK_WORKERS,
 ) -> dict[str, int]:
-    expire_after_hours = max(1, int(expire_after_hours or 24))
-    threshold = datetime.now() - timedelta(hours=expire_after_hours)
-    expired_ids = [
-        row.id
-        for row in db.query(Cdkey.id)
-        .filter(Cdkey.extract_status == "EXTRACTED", Cdkey.extracted_at.is_not(None), Cdkey.extracted_at < threshold)
-        .all()
-    ]
-    if not expired_ids:
-        return {"deleted_cdkeys": 0, "deleted_files": 0, "delete_failed": 0}
-    result = delete_cdkeys_with_bound_files(db, expired_ids, workers=workers)
-    return {
-        "deleted_cdkeys": int(result["deleted_cdkeys"]),
-        "deleted_files": int(result["deleted_files"]),
-        "delete_failed": int(result["delete_failed"]),
-    }
+    # Kept for existing maintenance callers: expiration now blocks guest access
+    # on request; retain cards and bound files so an administrator can unlock.
+    return {"deleted_cdkeys": 0, "deleted_files": 0, "delete_failed": 0}
 
 
 def cdkeys_csv(cdkeys: list[Cdkey]) -> bytes:

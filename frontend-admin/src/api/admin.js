@@ -77,6 +77,26 @@ export function exportCdkeysUrl(params = {}) {
   return `/admin/cdkeys/export${query ? `?${query}` : ''}`
 }
 
+export async function fetchCdkeyPassword(cdkeyId) {
+  const { data } = await apiClient.post(`/cdkeys/${cdkeyId}/password`)
+  return data
+}
+
+export async function changeCdkeyPassword(cdkeyId, password) {
+  const { data } = await apiClient.post(`/cdkeys/${cdkeyId}/change-password`, { password })
+  return data
+}
+
+export async function lockCdkey(cdkeyId) {
+  const { data } = await apiClient.post(`/cdkeys/${cdkeyId}/lock`)
+  return data
+}
+
+export async function unlockCdkeyPassword(cdkeyId) {
+  const { data } = await apiClient.post(`/cdkeys/${cdkeyId}/unlock-password`)
+  return data
+}
+
 export async function fetchCdkeyDetail(cdkeyId, params) {
   const { data } = await apiClient.get(`/cdkeys/${cdkeyId}`, { params })
   return data

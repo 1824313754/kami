@@ -1,5 +1,6 @@
 """Offline checks of the account worker's retry behavior; no network or database writes."""
 import ast
+import json
 import os
 from pathlib import Path
 import sys
@@ -63,7 +64,12 @@ def check_worker(source):
     assert any("3/3" in m for m in messages), "missing attempt progress"
     run([RuntimeError("temporary")] * 3, 3, "temporary")
     run([{"access_token": "test-access"}] * 3, 3, "完整令牌")
-    run([EmailOtpValidationError(403, "account_deactivated")], 1, "403")
+    run([EmailOtpValidationError(403, json.dumps({"error": {"code": "account_deactivated"}}))], 1, "403")
+    incorrect_code = EmailOtpValidationError(403, json.dumps({"error": {"code": "incorrect_code"}}))
+    messages = run([incorrect_code] * 3, 3, "incorrect_code")
+    assert any("2FA 已被修改" in message for message in messages)
+    run([EmailOtpValidationError(403, "not JSON")] * 3, 3, "403")
+    run([EmailOtpValidationError(403, json.dumps({"error": {"code": "rate_limit_exceeded"}}))], 1, "rate_limit_exceeded")
     run([RuntimeError("rate_limit_exceeded")], 1, "rate_limit_exceeded")
     run([RuntimeError("temporary")], 1, "task stopped", cancel=True)
 
@@ -74,4 +80,4 @@ if __name__ == "__main__":
     except AssertionError as exc:
         print("FAIL: " + str(exc))
         sys.exit(1)
-    print("PASS: retry worker (8 cases)")
+    print("PASS: retry worker (11 cases)")

@@ -3,7 +3,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Delete, Download, Plus, Setting, Upload } from '@element-plus/icons-vue'
-import { createCdkeys, deleteCdkeys, deleteCdkeysByCodes, exportCdkeysUrl, fetchCdkeys, importCdkeys, updateOverIssue } from '../api/admin'
+import { createCdkeys, deleteCdkeys, deleteCdkeysByCodes, exportCdkeysUrl, fetchCdkeys, importCdkeys, lockCdkey, unlockCdkeyPassword, updateOverIssue } from '../api/admin'
 import { useSessionStore } from '../stores/session'
 import { showRequestError } from '../utils/message'
 
@@ -90,6 +90,28 @@ function openDetail(row) {
       group_tag: scope.group_tag,
     },
   })
+}
+
+async function lockCard(row) {
+  try {
+    await ElMessageBox.confirm(`确定锁定卡密 ${row.code}？锁定后提取、重新授权、2FA 验证码及游客下载立即停用，需管理员解锁。`, '锁定卡密', { type: 'warning' })
+    const data = await lockCdkey(row.id)
+    ElMessage.success(data.message)
+    await loadData()
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') showRequestError(error)
+  }
+}
+
+async function unlockPassword(row) {
+  try {
+    await ElMessageBox.confirm('确认已核实持卡人身份后解锁？解锁将解除管理员锁定并清零密码错误次数；已提取卡密从解锁时起可再使用 24 小时，到期再次锁定。当前绑定密码及首次提取时间保持不变，用户需重新输入卡密和密码。', '解锁卡密', { type: 'warning' })
+    const data = await unlockCdkeyPassword(row.id)
+    ElMessage.success(data.message)
+    await loadData()
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') showRequestError(error)
+  }
 }
 
 async function submitCreate() {
@@ -317,7 +339,7 @@ watch(
       <div class="card-heading">
         <div>
           <h2>卡密列表</h2>
-          <p>只保留生成、超发、删除和详情这几个高频动作。</p>
+          <p>卡密首次提取满 24 小时，或累计输错密码 10 次后锁定，由超级管理员核实后解锁。</p>
         </div>
         <div class="action-strip">
           <el-button v-if="generatedCodes.length" :icon="CopyDocument" @click="copyGeneratedCodes">复制最近生成</el-button>
@@ -337,14 +359,35 @@ watch(
         <el-table-column type="selection" width="48" />
         <el-table-column prop="code" label="卡密" min-width="260" />
         <el-table-column prop="extract_status_text" label="状态" width="100" />
+        <el-table-column label="管理员锁定" width="120">
+          <template #default="{ row }">
+            <el-tag :type="row.admin_locked ? 'danger' : 'info'">{{ row.admin_locked ? '已锁定' : '未锁定' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="密码保护" width="150">
+          <template #default="{ row }">
+            <el-tag :type="row.password_locked ? 'danger' : 'info'">
+              {{ row.password_locked ? '已锁定' : (row.password_set ? '已设置' : '未设置') }} · {{ row.password_failures }}/10
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="使用期限" width="190">
+          <template #default="{ row }">
+            <el-tag :type="row.expiry_locked ? 'danger' : 'info'">
+              {{ row.expiry_locked ? '已到期，已锁定' : (row.access_expires_at === '-' ? '尚未开始计时' : row.access_expires_at) }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="batch_no" label="批次号" min-width="220" />
         <el-table-column prop="extraction_no" label="提取编号" width="190" />
         <el-table-column prop="files_per_key" label="文件数" width="90" />
         <el-table-column prop="created_at" label="创建时间" width="170" />
-        <el-table-column prop="extracted_at" label="提取时间" width="170" />
-        <el-table-column label="操作" width="90" fixed="right">
+        <el-table-column prop="extracted_at" label="首次提取时间" width="170" />
+        <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openDetail(row)">详情</el-button>
+            <el-button v-if="!row.admin_locked && sessionStore.session?.user?.is_admin" link type="danger" @click="lockCard(row)">锁定</el-button>
+            <el-button v-if="row.access_locked && sessionStore.session?.user?.is_admin" link type="warning" @click="unlockPassword(row)">解锁</el-button>
           </template>
         </el-table-column>
       </el-table>

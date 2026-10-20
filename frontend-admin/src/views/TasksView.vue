@@ -59,7 +59,7 @@ const taskKindOptions = [
   { label: '文件删除', value: 'file_delete' },
   { label: '文件测活', value: 'file_live_check' },
   { label: '前台提取', value: 'query_access' },
-  { label: '重登授权', value: 'query_reauth' },
+  { label: '401重新授权', value: 'query_reauth' },
 ]
 
 const taskStatusOptions = [
@@ -117,7 +117,7 @@ function taskLabel(item) {
     file_download: '文件下载',
     file_delete: '文件删除',
     query_access: '前台提取',
-    query_reauth: '重登授权',
+    query_reauth: '401重新授权',
   }
   return kindMap[item?.kind] || item?.kind || '-'
 }
@@ -467,7 +467,7 @@ onBeforeUnmount(stopPolling)
       <div class="card-heading">
         <div>
           <h2>任务进度</h2>
-          <p>查看上传、下载、删除、测活、提取和游客重登授权任务；支持按日期快速定位历史记录。</p>
+          <p>查看上传、下载、删除、测活、提取和游客401重新授权任务；支持按日期快速定位历史记录。</p>
         </div>
         <div class="action-strip">
           <el-button plain @click="refreshAll">刷新任务</el-button>

@@ -67,6 +67,12 @@ class Cdkey(Base, TimestampMixin):
     extraction_no: Mapped[str | None] = mapped_column(String(64), index=True)
     extracted_at: Mapped[datetime | None] = mapped_column(DateTime)
     first_extract_ip: Mapped[str | None] = mapped_column(String(64))
+    access_password_hash: Mapped[str | None] = mapped_column(String(255))
+    access_password_ciphertext: Mapped[str | None] = mapped_column(Text)
+    access_password_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    access_unlocked_until: Mapped[datetime | None] = mapped_column(DateTime)
+    access_admin_locked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    access_password_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
 
     batch = relationship("CdkeyBatch", back_populates="cdkeys")
     files = relationship("FileRecord", back_populates="bound_cdkey")

@@ -15,6 +15,8 @@ const form = reactive({
   unshippable_http_statuses: [401],
   task_workers: '50',
   query_totp_enabled: true,
+  query_password_setup_hint: '',
+  query_password_verify_hint: '',
   business_type_options: [],
 })
 
@@ -125,7 +127,7 @@ onMounted(loadData)
       <div class="card-heading">
         <div>
           <h2>系统设置</h2>
-          <p>保留当前真实可调的并发和测活参数，不增加虚假的配置项。</p>
+          <p>配置任务并发、测活参数、密码提示和业务类型。</p>
         </div>
       </div>
 
@@ -139,6 +141,13 @@ onMounted(loadData)
         <el-form-item label="2FA 验证码">
           <el-switch v-model="form.query_totp_enabled" active-text="启用" inactive-text="关闭" />
         </el-form-item>
+        <el-form-item label="卡密提取密码提示">
+          <el-input v-model="form.query_password_setup_hint" type="textarea" :rows="4" placeholder="留空恢复默认提示，支持多行文字" />
+        </el-form-item>
+        <el-form-item label="401重新授权 / 2FA 密码提示">
+          <el-input v-model="form.query_password_verify_hint" type="textarea" :rows="4" placeholder="留空恢复默认提示，支持多行文字" />
+        </el-form-item>
+        <p class="muted-text">用于前台密码输入弹窗，保存后自动更新；仅修改提示文字，密码格式与锁卡规则不变。</p>
         <el-form-item label="测活 User-Agent">
           <el-input v-model="form.live_check_user_agent" type="textarea" :rows="4" />
         </el-form-item>

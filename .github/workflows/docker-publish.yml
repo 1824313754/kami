@@ -33,20 +33,12 @@ jobs:
       - name: Verify 2FA and authorization retries
         run: |
           pip install -r requirements-python.txt
+          python -B tools/verify_cdkey_password.py
           python -B tools/verify_reauth_retry.py
           python -B tools/verify_two_factor_stock.py
           python -B tools/verify_two_factor_import.py
-          python -B - <<'PY'
-          import runpy
-          from pathlib import Path
-          checks = runpy.run_path('tools/verify_two_factor.py')
-          checks['check_totp']()
-          checks['check_mfa']()
-          checks = runpy.run_path('tools/verify_local_auth_store.py')
-          checks['routes'].JOB_HISTORY_PATH = Path(checks['workspace']) / 'task_history.json'
-          checks['routes'].EXTRACTION_JOBS.clear()
-          checks['main']()
-          PY
+          python -B tools/verify_two_factor.py
+          python -B tools/verify_local_auth_store.py
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3

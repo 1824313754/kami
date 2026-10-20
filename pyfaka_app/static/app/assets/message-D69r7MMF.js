@@ -1,0 +1,1 @@
+import{Q as e}from"./index-CWXqiYDK.js";function t(e){return e?.response?.data?.error||e?.message||`请求失败，请稍后重试`}function n(n){e.error(t(n))}export{n as t};

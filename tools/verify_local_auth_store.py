@@ -15,6 +15,8 @@ workspace = tempfile.mkdtemp(prefix="pyfaka-db-store-")
 os.environ["PYFAKA_DATABASE_URL"] = f"sqlite:///{os.path.join(workspace, 'verify.sqlite3').replace(os.sep, '/')}"
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from werkzeug.security import generate_password_hash
+
 from pyfaka_app import routes
 from pyfaka_app.database import DATA_DIR, SessionLocal, engine, ensure_sqlite_columns, init_db
 from pyfaka_app.models import AdminUser, AuditLog, Cdkey, CdkeyBatch, FileRecord, FileRecordPayload
@@ -29,6 +31,11 @@ from pyfaka_app.services import (
     upload_payload_files,
     zip_for_files,
 )
+
+
+routes.DATA_DIR = Path(workspace)
+routes.JOB_HISTORY_PATH = Path(workspace) / "task_history.json"
+routes.EXTRACTION_JOBS.clear()
 
 
 def assert_true(value, label):
@@ -407,8 +414,8 @@ def main():
                 deactivated_error = EmailOtpValidationError(403, deactivated_body)
                 assert_true(routes._reauth_public_error(deactivated_error) == "账户封禁", "account_deactivated should use the public banned-account reason")
                 assert_true(
-                    routes._reauth_public_error(EmailOtpValidationError(403, '{"error":{"code":"wrong_email_otp_code"}}')) == "账户封禁",
-                    "every OTP validation 403 should permanently ban reauthorization",
+                    routes._reauth_block_reason_for_exception(EmailOtpValidationError(403, '{"error":{"code":"wrong_email_otp_code"}}')) == "",
+                    "a rejected OTP must not permanently ban reauthorization",
                 )
                 assert_true(
                     routes._reauth_public_error(RuntimeError("普通上游请求失败: HTTP 403")) != "账户封禁",
@@ -438,6 +445,32 @@ def main():
                 blocked_job_id = "verify-query-reauth-account-deactivated"
                 skipped_job_id = "verify-query-reauth-account-deactivated-skip"
                 expected_live_check_ids = [record.id]
+
+                incorrect_job_id = "verify-query-reauth-incorrect-code"
+                incorrect_attempts = []
+                original_reauth_info = db.get(FileRecordPayload, record.id).reauth_info
+
+                def fake_incorrect_reauthorize(*_args, **_kwargs):
+                    incorrect_attempts.append(True)
+                    raise EmailOtpValidationError(403, json.dumps({"error": {"code": "incorrect_code"}}))
+
+                oauth_flow.reauthorize_account = fake_incorrect_reauthorize
+                routes.register_job({"id": incorrect_job_id, "kind": "query_reauth", "status": "queued", "events": []})
+                incorrect_worker = Thread(
+                    target=routes.run_query_reauth_job,
+                    args=(incorrect_job_id, [record.id], [record.id], 1, "127.0.0.1"),
+                )
+                incorrect_worker.start()
+                incorrect_worker.join(10)
+                assert_true(not incorrect_worker.is_alive(), "incorrect-code reauth job should stop")
+                incorrect_job = routes.EXTRACTION_JOBS[incorrect_job_id]
+                assert_true(incorrect_job["status"] == "error", "incorrect-code reauth should fail")
+                assert_true(len(incorrect_attempts) == 3, "incorrect code should retain ordinary retries")
+                assert_true(incorrect_job["result_rows"][0]["reason"] == "2FA 已被修改，请更新 2FA 密钥后重试", "incorrect code should identify the 2FA failure")
+                assert_true("2FA 已被修改" in incorrect_job["live_check_result_rows"][0]["progress_log"], "account progress should show the 2FA reason")
+                db.expire_all()
+                assert_true(db.get(FileRecordPayload, record.id).reauth_info == original_reauth_info, "incorrect code must not persist a ban or alter credentials")
+                routes.EXTRACTION_JOBS.pop(incorrect_job_id, None)
 
                 def fake_deactivated_reauthorize(_target_email, _credential, _settings, on_progress=None):
                     if on_progress:
@@ -541,6 +574,13 @@ def main():
                 expected_live_check_ids = None
                 oauth_flow.reauthorize_account = fake_reauthorize
 
+                download_batch = CdkeyBatch(batch_no="DOWNLOAD-AUTH", prefix="TEST", key_date="20261020", total_count=1, files_per_key=2)
+                db.add(download_batch)
+                db.flush()
+                download_card = Cdkey(batch_id=download_batch.id, code="DOWNLOAD-AUTH", files_per_key=2, access_password_hash=generate_password_hash("Test12"))
+                db.add(download_card)
+                db.commit()
+                routes.update_job(reauth_job_id, cdkey_ids=[download_card.id])
                 download_app = Flask(__name__)
                 download_app.config.update(SECRET_KEY="verification-secret", TESTING=True)
                 download_app.register_blueprint(routes.bp)
@@ -549,6 +589,8 @@ def main():
                 with download_client.session_transaction() as guest_session:
                     guest_session[routes.QUERY_REAUTH_JOB_SESSION_KEY] = reauth_job_id
                     guest_session[routes.QUERY_REAUTH_TOKEN_SESSION_KEY] = download_token
+                    guest_session[routes.QUERY_REAUTH_PASSWORD_JOB_SESSION_KEY] = reauth_job_id
+                    guest_session[routes.QUERY_REAUTH_PASSWORD_VERSIONS_SESSION_KEY] = {str(download_card.id): 1}
                 cpa_response = download_client.get(
                     f"/api/query/reauth/{reauth_job_id}/download?format=cpa&token={download_token}"
                 )
@@ -663,7 +705,7 @@ def main():
         )
         db.add(batch)
         db.flush()
-        cdkey = Cdkey(batch_id=batch.id, code="TEST-20260622-ABCDEFGHJKLMNPQRST", files_per_key=2, extract_status="EXTRACTED")
+        cdkey = Cdkey(batch_id=batch.id, code="TEST-20260622-ABCDEFGHJKLMNPQRST", files_per_key=2, extract_status="EXTRACTED", access_password_hash=generate_password_hash("Test12"))
         db.add(cdkey)
         db.flush()
         record_id = record.id
@@ -726,7 +768,7 @@ def main():
                 routes.find_running_query_reauth_job_for_cdkeys([cdkey.id, 999]) is not None,
                 "overlapping multi-card reauth submissions should find the existing job",
             )
-            reused_response = client.post("/api/query/reauth", json={"codes": cdkey.code})
+            reused_response = client.post("/api/query/reauth", json={"password": "Test12", "codes": cdkey.code})
             reused_payload = reused_response.get_json()
             assert_true(reused_response.status_code == 202, "duplicate reauth submission should reuse the active task")
             assert_true(reused_payload["reused"] is True, "duplicate reauth response should identify the reused task")
@@ -738,19 +780,19 @@ def main():
 
         routes.QUERY_ATTEMPTS.clear()
         set_setting(db, QUERY_TOTP_ENABLED_KEY, "0")
-        assert_true(client.post("/api/query/2fa/accounts", json={"code": cdkey.code}).status_code == 403, "disabled 2FA lookup should reject access")
+        assert_true(client.post("/api/query/2fa/accounts", json={"password": "Test12", "code": cdkey.code}).status_code == 403, "disabled 2FA lookup should reject access")
         set_setting(db, QUERY_TOTP_ENABLED_KEY, "1")
-        accounts = client.post("/api/query/2fa/accounts", json={"code": cdkey.code})
+        accounts = client.post("/api/query/2fa/accounts", json={"password": "Test12", "code": cdkey.code})
         assert_true(accounts.get_json()["accounts"] == ["batch@example.com", "test@example.com"], "2FA should list only bound accounts")
-        assert_true(client.post("/api/query/2fa/code", json={"code": cdkey.code, "email": "unbound@example.com"}).status_code == 404, "2FA should reject an unbound account")
-        code_response = client.post("/api/query/2fa/code", json={"code": cdkey.code, "email": record.email_name})
+        assert_true(client.post("/api/query/2fa/code", json={"password": "Test12", "code": cdkey.code, "email": "unbound@example.com"}).status_code == 404, "2FA should reject an unbound account")
+        code_response = client.post("/api/query/2fa/code", json={"password": "Test12", "code": cdkey.code, "email": record.email_name})
         assert_true(code_response.status_code == 200, "2FA should generate a code locally")
         code_payload = code_response.get_json()
         assert_true(code_payload["password"] == "account-secret", "code API should return the selected account password")
         assert_true(set(code_payload) == {"ok", "email", "password", "code", "expires_in", "period", "refreshed_at"}, "code API should expose only the requested login fields and code timing")
         assert_true(len(code_payload["code"]) == 6 and code_payload["code"].isdigit(), "2FA should return six digits")
         assert_true(code_response.headers["Cache-Control"] == "no-store", "code must not be cached")
-        assert_true(client.post("/api/query/2fa/code", json={"code": cdkey.code, "email": record.email_name}).status_code == 429, "code refresh should respect cooldown")
+        assert_true(client.post("/api/query/2fa/code", json={"password": "Test12", "code": cdkey.code, "email": record.email_name}).status_code == 429, "code refresh should respect cooldown")
 
         original_thread = routes.Thread
 
@@ -764,9 +806,9 @@ def main():
 
         routes.Thread = DeferredThread
         try:
-            missing_response = client.post("/api/query/reauth", json={"codes": "MISSING-CARD"})
-            assert_true(missing_response.status_code == 404, "unknown card should not start guest reauth")
-            no_401_response = client.post("/api/query/reauth", json={"codes": cdkey.code})
+            missing_response = client.post("/api/query/reauth", json={"codes": "MISSING-CARD", "password": "Test12"})
+            assert_true(missing_response.status_code == 403, "unknown card should not start guest reauth")
+            no_401_response = client.post("/api/query/reauth", json={"password": "Test12", "codes": cdkey.code})
             assert_true(no_401_response.status_code == 202, "guest reauth should start a fresh live check")
             no_401_payload = no_401_response.get_json()
             no_401_job_id = no_401_payload["job_id"]
@@ -776,7 +818,7 @@ def main():
             routes.EXTRACTION_JOBS.pop(no_401_job_id, None)
             record.live_http_status = 401
             db.commit()
-            response = client.post("/api/query/reauth", json={"codes": cdkey.code, "workers": 99})
+            response = client.post("/api/query/reauth", json={"password": "Test12", "codes": cdkey.code, "workers": 99})
             assert_true(response.status_code == 202, "guest should start reauth directly by card")
             response_payload = response.get_json()
             reauth_job_id = response_payload["job_id"]

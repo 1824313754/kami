@@ -120,11 +120,16 @@ def _extract_auth_statsig_storage_keys(html: str) -> list[str]:
 
 
 class EmailOtpValidationError(RuntimeError):
-    """Email OTP validation failed with an upstream HTTP status."""
+    """OTP validation failed with an upstream HTTP status and error code."""
 
     def __init__(self, status_code: int, body: str = ""):
         self.status_code = int(status_code)
         self.body = str(body or "")
+        try:
+            error = json.loads(self.body).get("error", {})
+        except (ValueError, AttributeError):
+            error = {}
+        self.error_code = error.get("code", "") if isinstance(error, dict) else ""
         super().__init__(f"OTP 验证失败: {self.status_code} - {self.body[:260]}")
 
 
@@ -4195,8 +4200,7 @@ class AuthFlow:
                 error = response.json().get("error", {})
             except (ValueError, AttributeError):
                 error = {}
-            reason = "rate_limit_exceeded" if isinstance(error, dict) and error.get("code") == "rate_limit_exceeded" else "verification_failed"
-            raise EmailOtpValidationError(response.status_code, f"2FA {reason}")
+            raise EmailOtpValidationError(response.status_code, json.dumps({"error": error}, ensure_ascii=False))
         result = response.json()
         if self._extract_page_type(result) == "mfa_challenge":
             raise RuntimeError("2FA 验证未通过，请检查密钥和服务器时间")

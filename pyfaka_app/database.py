@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from sqlalchemy import create_engine, event, inspect
+from sqlalchemy import Text, create_engine, event, inspect
 from sqlalchemy.orm import declarative_base, scoped_session, sessionmaker
 
 
@@ -37,6 +37,29 @@ if DATABASE_URL.startswith("sqlite"):
 def ensure_sqlite_columns() -> None:
     if not DATABASE_URL.startswith("sqlite"):
         inspector = inspect(engine)
+        if "cdkey_py" in inspector.get_table_names():
+            columns = {column["name"] for column in inspector.get_columns("cdkey_py")}
+            if "access_password_hash" not in columns:
+                with engine.begin() as conn:
+                    conn.exec_driver_sql("ALTER TABLE cdkey_py ADD COLUMN access_password_hash VARCHAR(255) NULL")
+            if "access_password_ciphertext" not in columns:
+                with engine.begin() as conn:
+                    conn.exec_driver_sql("ALTER TABLE cdkey_py ADD COLUMN access_password_ciphertext TEXT NULL")
+            elif not isinstance(next(column["type"] for column in inspector.get_columns("cdkey_py") if column["name"] == "access_password_ciphertext"), Text):
+                with engine.begin() as conn:
+                    conn.exec_driver_sql("ALTER TABLE cdkey_py MODIFY COLUMN access_password_ciphertext TEXT NULL")
+            if "access_admin_locked" not in columns:
+                with engine.begin() as conn:
+                    conn.exec_driver_sql("ALTER TABLE cdkey_py ADD COLUMN access_admin_locked BOOLEAN NOT NULL DEFAULT 0")
+            if "access_password_version" not in columns:
+                with engine.begin() as conn:
+                    conn.exec_driver_sql("ALTER TABLE cdkey_py ADD COLUMN access_password_version INTEGER NOT NULL DEFAULT 1")
+            if "access_unlocked_until" not in columns:
+                with engine.begin() as conn:
+                    conn.exec_driver_sql("ALTER TABLE cdkey_py ADD COLUMN access_unlocked_until DATETIME NULL")
+            if "access_password_failures" not in columns:
+                with engine.begin() as conn:
+                    conn.exec_driver_sql("ALTER TABLE cdkey_py ADD COLUMN access_password_failures INTEGER NOT NULL DEFAULT 0")
         if "file_record_payload_py" in inspector.get_table_names():
             payload_columns = {column["name"] for column in inspector.get_columns("file_record_payload_py")}
             if "mailinfo" not in payload_columns:
@@ -63,6 +86,12 @@ def ensure_sqlite_columns() -> None:
             "mailinfo": "TEXT NOT NULL DEFAULT ''",
         },
         "cdkey_py": {
+            "access_password_hash": "VARCHAR(255)",
+            "access_password_ciphertext": "TEXT",
+            "access_password_failures": "INTEGER NOT NULL DEFAULT 0",
+            "access_unlocked_until": "DATETIME",
+            "access_password_version": "INTEGER NOT NULL DEFAULT 1",
+            "access_admin_locked": "BOOLEAN NOT NULL DEFAULT 0",
             "extraction_no": "VARCHAR(64)",
         },
         "admin_user_py": {
