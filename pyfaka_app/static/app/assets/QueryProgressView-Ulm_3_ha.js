@@ -1,0 +1,1 @@
+import{Dt as e,J as t,Nt as n,Pt as r,Y as i}from"./index-CaEvvjyS.js";var a={__name:`QueryProgressView`,setup(a){let o=t(),s=i();return n(()=>{s.replace({name:`query`,query:{job_id:o.params.jobId,token:o.query.token}})}),(t,n)=>(r(),e(`div`))}};export{a as default};

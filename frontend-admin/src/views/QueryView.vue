@@ -57,6 +57,7 @@ let stockTimer = null
 let reauthTimer = null
 let totpCooldownTimer = null
 let totpExpiryTimer = null
+let totpAccessPassword = ''
 
 const currentJobId = computed(() => String(route.query.job_id || '').trim())
 const currentAccessToken = computed(() => String(route.query.token || '').trim())
@@ -338,13 +339,14 @@ async function requestCardPassword(allowSetup = false) {
 
 async function loadTotpAccounts() {
   const code = form.totp_cdkey.trim()
-  if (!code || totpAccountsLoading.value) return
+  if (!code || totpAccountsLoading.value || totpLoading.value) return
   totpAccountsLoading.value = true
   try {
-    const password = await requestCardPassword()
+    const password = totpAccessPassword || await requestCardPassword()
     if (password === null || form.totp_cdkey.trim() !== code) return
     const data = await fetchQueryTotpAccounts({ code, password })
     if (form.totp_cdkey.trim() !== code) return
+    totpAccessPassword = password
     totpLookup.loadedCode = code
     totpLookup.accounts = data.accounts || []
     totpLookup.password = ''
@@ -353,6 +355,7 @@ async function loadTotpAccounts() {
     form.totp_email = totpLookup.accounts[0] || ''
     ElMessage.success(`已加载 ${totpLookup.accounts.length} 个邮箱`)
   } catch (error) {
+    clearRejectedTotpPassword(error, code)
     showRequestError(error)
   } finally {
     totpAccountsLoading.value = false
@@ -360,18 +363,29 @@ async function loadTotpAccounts() {
 }
 
 function handleTotpAccountChange() {
+  clearTimeout(totpExpiryTimer)
   totpLookup.password = ''
   totpLookup.code = ''
   totpLookup.hasLoadedCode = false
 }
 
+function clearRejectedTotpPassword(error, code) {
+  if (form.totp_cdkey.trim() !== code) return
+  const status = error?.response?.status
+  const reason = error?.response?.data?.code || ''
+  if (status === 403 || status === 423 || reason.startsWith('PASSWORD_')) {
+    totpAccessPassword = ''
+    handleTotpAccountChange()
+  }
+}
+
 async function loadTotpCode() {
-  if (!totpLookup.loadedCode || !form.totp_email || totpLoading.value || totpCooldown.value > 0) return
+  if (!totpLookup.loadedCode || !form.totp_email || totpLoading.value || totpAccountsLoading.value || totpCooldown.value > 0) return
   totpLoading.value = true
   const selectedCode = totpLookup.loadedCode
   const selectedEmail = form.totp_email
   try {
-    const password = await requestCardPassword()
+    const password = totpAccessPassword || await requestCardPassword()
     if (password === null || totpLookup.loadedCode !== selectedCode || form.totp_email !== selectedEmail) return
     const data = await fetchQueryTotpCode({
       code: selectedCode,
@@ -379,6 +393,7 @@ async function loadTotpCode() {
       password,
     })
     if (totpLookup.loadedCode !== selectedCode || form.totp_email !== selectedEmail) return
+    totpAccessPassword = password
     totpLookup.password = data.password || ''
     totpLookup.code = data.code || ''
     totpLookup.hasLoadedCode = true
@@ -386,6 +401,7 @@ async function loadTotpCode() {
     totpExpiryTimer = setTimeout(() => { totpLookup.code = '' }, data.expires_in * 1000)
     startTotpCooldown(5)
   } catch (error) {
+    clearRejectedTotpPassword(error, selectedCode)
     const retryAfter = Number(error?.response?.data?.retry_after || 0)
     if (retryAfter > 0) startTotpCooldown(retryAfter)
     showRequestError(error)
@@ -638,6 +654,8 @@ watch(
   () => form.totp_cdkey,
   (value) => {
     if (String(value || '').trim() === totpLookup.loadedCode) return
+    totpAccessPassword = ''
+    clearTimeout(totpExpiryTimer)
     totpLookup.loadedCode = ''
     totpLookup.accounts = []
     totpLookup.password = ''
@@ -685,6 +703,7 @@ onBeforeUnmount(() => {
   stopStockPolling()
   stopTotpCooldown()
   clearTimeout(totpExpiryTimer)
+  totpAccessPassword = ''
 })
 </script>
 
@@ -1014,7 +1033,7 @@ onBeforeUnmount(() => {
             <el-alert
               class="query-totp-help"
               title="账号邮箱、密码、2FA 验证码看这里"
-              description="输入卡密并加载邮箱，选择账号后点击「获取验证码」，即可查看登录邮箱、密码和当前 2FA 验证码。"
+              description="输入卡密并验证一次提取密码，即可切换邮箱、获取或刷新验证码；更换卡密或刷新页面后需重新验证。"
               type="info"
               show-icon
               :closable="false"
@@ -1042,7 +1061,7 @@ onBeforeUnmount(() => {
                 type="primary"
                 :icon="Search"
                 :loading="totpAccountsLoading"
-                :disabled="!form.totp_cdkey.trim()"
+                :disabled="!form.totp_cdkey.trim() || totpLoading"
                 @click="loadTotpAccounts"
               >
                 加载邮箱
@@ -1069,7 +1088,7 @@ onBeforeUnmount(() => {
                 <el-button
                   :icon="RefreshRight"
                   :loading="totpLoading"
-                  :disabled="!totpLookup.loadedCode || !form.totp_email || totpCooldown > 0"
+                  :disabled="!totpLookup.loadedCode || !form.totp_email || totpAccountsLoading || totpCooldown > 0"
                   @click="loadTotpCode"
                 >
                   {{ totpRefreshText }}
