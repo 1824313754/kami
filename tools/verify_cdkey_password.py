@@ -18,7 +18,7 @@ from sqlalchemy import inspect
 from sqlalchemy.orm import sessionmaker
 from werkzeug.security import check_password_hash, generate_password_hash
 from pyfaka_app import routes
-from pyfaka_app.cdkey_password import CdkeyPasswordError, cdkey_access_deadline, cdkey_access_expired, decrypt_cdkey_password, verify_cdkey_password
+from pyfaka_app.cdkey_password import CdkeyPasswordError, decrypt_cdkey_password, verify_cdkey_password
 from pyfaka_app.database import Base, SessionLocal, engine, ensure_sqlite_columns
 from pyfaka_app.models import AdminUser, AuditLog, Cdkey, CdkeyBatch, FileRecord, FileRecordPayload
 from pyfaka_app.services import access_cdkeys_bulk, cleanup_expired_extracted_cdkeys, payload_to_db_fields
@@ -307,108 +307,82 @@ def main():
     response = client.post("/api/query/2fa/accounts", json={"code": "API-CARD", "password": PASSWORD})
     assert response.status_code == 200, response.json
 
-    # Exactly 24 hours from first successful extraction, then fresh windows only
-    # after an authenticated admin unlock. No wall-clock sleeps or real deletion.
-    first_extracted = datetime.now().replace(microsecond=0) - timedelta(hours=23)
-    first_deadline = first_extracted + timedelta(hours=24)
-    with factory() as db:
-        card = db.get(Cdkey, api_id)
-        card.extracted_at = first_extracted
-        ciphertext_before_expiry = card.access_password_ciphertext
-        db.commit()
-        assert cdkey_access_deadline(card) == first_deadline
-
-    class TestClock(datetime):
-        current = first_deadline - timedelta(microseconds=1)
-
-        @classmethod
-        def now(cls, tz=None):
-            return cls.current.replace(tzinfo=tz) if tz else cls.current
-
+    # Old cards, including previously renewed cards, remain usable beyond 24 hours.
     admin_headers = {"X-CSRF-Token": login.json["session"]["csrf_token"]}
-    with patch("pyfaka_app.cdkey_password.datetime", TestClock), patch.object(routes, "datetime", TestClock):
+    current_downloads = urls + downloads
+    test_now = datetime.now().replace(microsecond=0)
+    scenarios = [
+        (timedelta(hours=24, seconds=-1), None),
+        (timedelta(hours=24), None),
+        (timedelta(days=3), None),
+        (timedelta(days=365), test_now - timedelta(days=2)),
+        (timedelta(days=365), test_now + timedelta(hours=1)),
+    ]
+    for age, legacy_deadline in scenarios:
+        first_extracted = test_now - age
+        with factory() as db:
+            card = db.get(Cdkey, api_id)
+            card.extracted_at = first_extracted
+            card.access_unlocked_until = legacy_deadline
+            db.commit()
         routes.QUERY_FAILURES.clear()
         routes.QUERY_ATTEMPTS.clear()
-        before_expiry = client.post("/api/query/2fa/accounts", json={"code": "API-CARD", "password": PASSWORD})
-        assert before_expiry.status_code == 200, before_expiry.json
-        for url in downloads:
-            assert client.get(url).status_code == 200, url
-        with factory() as db:
-            card = db.get(Cdkey, api_id)
-            access_cdkeys_bulk(db, [card.code], "192.0.2.3", live_check=False)
-            db.refresh(card)
-            assert card.extracted_at == first_extracted and card.access_unlocked_until is None
-            assert not cdkey_access_expired(card)
-            assert not cdkey_access_expired(db.get(Cdkey, pending_id)), "unextracted cards do not expire"
-
-        TestClock.current = first_deadline
-        for url, payload in endpoints:
-            response = client.post(url, json={**payload, "password": PASSWORD})
-            assert response.status_code == 423 and response.json["code"] == "CDKEY_EXPIRED", response.json
-        for url in urls + downloads + [f"/api/query/jobs/{reauth_id}?token={reauth_token}", f"/api/query/jobs/{reauth_id}?token={token}"]:
-            assert client.get(url).status_code == 403, url
-        for kind in ["cpa", "sub2api", "2fa", "card-cpa", "card-sub2api", "card-2fa"]:
-            response = client.get(f"/api/query/reauth/{reauth_id}/download?format={kind}&token={reauth_token}")
-            assert response.status_code == 403, kind
-        assert client.post(f"/api/query/reauth/{reauth_id}/terminate?token={reauth_token}").status_code == 403
-        with factory() as db:
-            card = db.get(Cdkey, api_id)
-            assert card.access_password_failures == 0, "expiry must not count as an incorrect password"
-            records_before = db.query(FileRecord).filter_by(bound_cdkey_id=api_id).count()
-            assert cleanup_expired_extracted_cdkeys(db) == {"deleted_cdkeys": 0, "deleted_files": 0, "delete_failed": 0}
-            assert db.get(Cdkey, api_id) and db.query(FileRecord).filter_by(bound_cdkey_id=api_id).count() == records_before
-            with app.test_request_context():
-                state = routes.cdkey_item_payload(card)
-                assert state["expiry_locked"] and state["access_locked"] and not state["password_locked"]
-        assert owner_client.post(unlock_url, headers={"X-CSRF-Token": owner_csrf}).status_code == 403
-        assert admin_client.post(unlock_url).status_code == 400
-        TestClock.current = first_deadline + timedelta(hours=2)
-        response = admin_client.post(unlock_url, headers=admin_headers)
-        assert response.status_code == 200, response.json
-        renewed_deadline = TestClock.current + timedelta(hours=24)
-        with factory() as db:
-            card = db.get(Cdkey, api_id)
-            assert card.access_unlocked_until == renewed_deadline
-            assert card.extracted_at == first_extracted and card.access_password_hash == bound_hash
-            assert card.access_password_ciphertext == ciphertext_before_expiry
-        # Reopening a DB session and clearing process counters must preserve the renewal.
-        routes.QUERY_FAILURES.clear()
-        routes.QUERY_ATTEMPTS.clear()
-        for url in downloads:
-            assert client.get(url).status_code == 200, url
+        # Previously issued credentials must also ignore the card's age/deadline.
+        for url in current_downloads:
+            assert client.get(url).status_code == 200, (age, legacy_deadline, url)
         for url, payload in endpoints:
             with patch.object(routes, "Thread"):
                 response = client.post(url, json={**payload, "password": PASSWORD})
-            assert response.status_code in {200, 202}, (url, response.json)
+            assert response.status_code in {200, 202}, (age, legacy_deadline, url, response.json)
             if url.endswith("access"):
                 renewed_job, renewed_token = response.json["job_id"], response.json["access_token"]
                 routes.update_job(renewed_job, status="done", cdkey_ids=[api_id])
             elif url.endswith("reauth"):
-                reauth_token = response.json["access_token"]
-        renewed_download = f"/query/files/download-2fa?job_id={renewed_job}&token={renewed_token}"
-        TestClock.current = renewed_deadline - timedelta(microseconds=1)
-        assert client.get(renewed_download).status_code == 200
-        TestClock.current = renewed_deadline
-        assert client.get(renewed_download).status_code == 403
-        assert client.get(f"/api/query/jobs/{reauth_id}?token={reauth_token}").status_code == 403
-        for url, payload in endpoints:
-            response = client.post(url, json={**payload, "password": PASSWORD})
-            assert response.status_code == 423 and response.json["code"] == "CDKEY_EXPIRED"
-        # A second unlock renews again; password lockout is independent of the time grant.
-        response = admin_client.post(unlock_url, headers=admin_headers)
-        assert response.status_code == 200
+                reauth_id, reauth_token = response.json["job_id"], response.json["access_token"]
+        renewed_query = f"?job_id={renewed_job}&token={renewed_token}"
+        current_downloads = ["/api/query/result" + renewed_query,
+                             f"/api/query/jobs/{renewed_job}?token={renewed_token}",
+                             f"/query/progress/{renewed_job}.json?token={renewed_token}"]
+        current_downloads += ["/query/files/" + kind + renewed_query for kind in ["download", "download-sub", "download-2fa"]]
+        for url in current_downloads:
+            assert client.get(url).status_code == 200, (age, url)
+        assert client.get(f"/api/query/jobs/{reauth_id}?token={reauth_token}").status_code == 200
+        for kind in ["cpa", "sub2api", "2fa", "card-cpa", "card-sub2api", "card-2fa"]:
+            response = client.get(f"/api/query/reauth/{reauth_id}/download?format={kind}&token={reauth_token}")
+            assert response.status_code == 409 and response.json["code"] == "JOB_PENDING", (kind, response.json)
         with factory() as db:
             card = db.get(Cdkey, api_id)
-            assert card.access_unlocked_until == renewed_deadline + timedelta(hours=24)
-            card.access_password_failures = 10
-            db.commit()
-        assert client.get(renewed_download).status_code == 403
-        response = client.post("/api/query/2fa/accounts", json={"code": "API-CARD", "password": PASSWORD})
-        assert response.status_code == 423 and response.json["code"] == "PASSWORD_LOCKED"
-        assert admin_client.post(unlock_url, headers=admin_headers).status_code == 200
+            access_cdkeys_bulk(db, [card.code], "192.0.2.3", live_check=False)
+            db.refresh(card)
+            assert card.extracted_at == first_extracted and card.access_unlocked_until == legacy_deadline
+            assert card.access_password_failures == 0 and card.access_password_hash == bound_hash
+            records_before = db.query(FileRecord).filter_by(bound_cdkey_id=api_id).count()
+            assert cleanup_expired_extracted_cdkeys(db) == {"deleted_cdkeys": 0, "deleted_files": 0, "delete_failed": 0}
+            assert db.get(Cdkey, api_id) and db.query(FileRecord).filter_by(bound_cdkey_id=api_id).count() == records_before
+            state = routes.cdkey_item_payload(card)
+            assert not state["expiry_locked"] and not state["access_locked"]
+            assert state["access_expires_at"] == "-"
+
+    # Admin unlock clears password failures without granting another timed window.
+    renewed_download = "/query/files/download-2fa" + renewed_query
+    with factory() as db:
+        card = db.get(Cdkey, api_id)
+        card.access_password_failures = 10
+        db.commit()
+    assert client.get(renewed_download).status_code == 403
+    response = client.post("/api/query/2fa/accounts", json={"code": "API-CARD", "password": PASSWORD})
+    assert response.status_code == 423 and response.json["code"] == "PASSWORD_LOCKED"
+    for _ in range(2):
+        response = admin_client.post(unlock_url, headers=admin_headers)
+        assert response.status_code == 200 and response.json["access_expires_at"] == "-"
+        assert "到期" not in response.json["message"]
+        with factory() as db:
+            card = db.get(Cdkey, api_id)
+            assert card.extracted_at == first_extracted and card.access_unlocked_until == legacy_deadline
+            assert card.access_password_failures == 0 and card.access_password_hash == bound_hash
         assert client.get(renewed_download).status_code == 200
 
-    # Changing a bound password revokes existing guest credentials, not the time grant.
+    # Changing a bound password revokes existing guest credentials.
     routes.QUERY_FAILURES.clear()
     routes.QUERY_ATTEMPTS.clear()
     change_url = f"/api/admin/cdkeys/{api_id}/change-password"
@@ -566,13 +540,12 @@ def main():
         assert (card.extracted_at, card.access_unlocked_until) == preserved[:2]
     response = client.post(endpoints[2][0], json={**endpoints[2][1], "password": new_password})
     assert response.status_code == 423 and response.json["code"] == "CDKEY_ADMIN_LOCKED"
-    unlock_before = datetime.now()
     assert admin_client.post(unlock_url, headers=admin_headers).status_code == 200
     with factory() as db:
         card = db.get(Cdkey, api_id)
         assert not card.access_admin_locked and card.access_password_failures == 0
         assert card.extracted_at == first_extracted
-        assert unlock_before + timedelta(hours=24) <= card.access_unlocked_until <= datetime.now() + timedelta(hours=24)
+        assert card.access_unlocked_until == preserved[1]
     for url in lock_urls:
         assert client.get(url).status_code == 403, 'unlock must not reactivate revoked credentials: ' + url
     for url, payload in endpoints:
@@ -620,7 +593,7 @@ def main():
         with app.test_request_context(headers={"X-Forwarded-For": "192.0.2.10"}, environ_base={"REMOTE_ADDR": "198.51.100.1"}):
             assert routes.password_ip_key() == "cdkey-password-ip:198.51.100.1"
     assert PASSWORD not in routes.JOB_HISTORY_PATH.read_text(encoding="utf-8")
-    print("PASS: migration; format; atomic first binding; cumulative concurrent locks; all APIs and downloads; legacy sessions; batch scope; admin unlock; shared IP guard; exact 24-hour expiry; renewable admin windows; no expiry deletion; admin password change and credential revocation; persistent admin locks and unlock windows")
+    print("PASS: migration; format; atomic first binding; cumulative concurrent locks; all APIs and downloads; legacy sessions; batch scope; admin unlock; shared IP guard; access before/at/after 24 hours; ignored legacy deadlines; untimed admin unlock; no expiry deletion; admin password change and credential revocation; persistent admin locks and credential revocation")
     SessionLocal.remove()
     engine.dispose()
 

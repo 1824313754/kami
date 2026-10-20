@@ -59,7 +59,7 @@ async function changePassword() {
   passwordChanging.value = true
   try {
     const { value } = await ElMessageBox.prompt(
-      `修改卡密 ${cdkey.value.code} 的提取密码。新密码生效后，用户需重新验证；锁定状态、首次提取时间和使用期限保持不变。`,
+      `修改卡密 ${cdkey.value.code} 的提取密码。新密码生效后，用户需重新验证；锁定状态和首次提取时间保持不变。`,
       '修改提取密码',
       {
         inputType: 'password',
@@ -90,7 +90,7 @@ async function setCardLock(locked) {
     await ElMessageBox.confirm(
       locked
         ? `确定锁定卡密 ${code}？锁定后提取、重新授权、2FA 验证码及游客下载立即停用，需管理员解锁。`
-        : `确认已核实卡密 ${code} 的持有人身份后解锁？解锁将解除管理员锁定并清零密码错误次数；已提取卡密从解锁时起可再使用 24 小时。当前绑定密码及首次提取时间保持不变，用户需重新验证。`,
+        : `确认已核实卡密 ${code} 的持有人身份后解锁？解锁将解除管理员锁定并清零密码错误次数，不再设置使用期限。当前绑定密码及首次提取时间保持不变，用户需重新验证。`,
       locked ? '锁定卡密' : '解锁卡密',
       { type: 'warning' },
     )
@@ -179,8 +179,8 @@ onMounted(loadData)
             <span>修改绑定密码</span>
             <el-button type="warning" plain :loading="passwordChanging" @click="changePassword">修改提取密码</el-button>
           </div>
-          <div class="detail-row"><span>使用期限</span><strong>{{ cdkey.access_expires_at }}</strong></div>
-          <div class="detail-row"><span>锁定状态</span><strong>{{ cdkey.admin_locked ? '管理员锁定' : (cdkey.expiry_locked ? '24 小时使用期限已满' : (cdkey.password_locked ? '密码错误达到 10 次' : '未锁定')) }}</strong></div>
+          <div class="detail-row"><span>使用期限</span><strong>无时间限制</strong></div>
+          <div class="detail-row"><span>锁定状态</span><strong>{{ cdkey.admin_locked ? '管理员锁定' : (cdkey.password_locked ? '密码错误达到 10 次' : '未锁定') }}</strong></div>
           <div class="detail-row" v-if="sessionStore.session?.user?.is_admin">
             <span>卡密锁定管理</span>
             <div>

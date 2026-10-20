@@ -105,7 +105,7 @@ async function lockCard(row) {
 
 async function unlockPassword(row) {
   try {
-    await ElMessageBox.confirm('确认已核实持卡人身份后解锁？解锁将解除管理员锁定并清零密码错误次数；已提取卡密从解锁时起可再使用 24 小时，到期再次锁定。当前绑定密码及首次提取时间保持不变，用户需重新输入卡密和密码。', '解锁卡密', { type: 'warning' })
+    await ElMessageBox.confirm('确认已核实持卡人身份后解锁？解锁将解除管理员锁定并清零密码错误次数，不再设置使用期限。当前绑定密码及首次提取时间保持不变，用户需重新输入卡密和密码。', '解锁卡密', { type: 'warning' })
     const data = await unlockCdkeyPassword(row.id)
     ElMessage.success(data.message)
     await loadData()
@@ -339,7 +339,7 @@ watch(
       <div class="card-heading">
         <div>
           <h2>卡密列表</h2>
-          <p>卡密首次提取满 24 小时，或累计输错密码 10 次后锁定，由超级管理员核实后解锁。</p>
+          <p>卡密无使用时间限制；管理员可手动锁定，累计输错密码 10 次也会锁定，由超级管理员核实后解锁。</p>
         </div>
         <div class="action-strip">
           <el-button v-if="generatedCodes.length" :icon="CopyDocument" @click="copyGeneratedCodes">复制最近生成</el-button>
@@ -372,10 +372,8 @@ watch(
           </template>
         </el-table-column>
         <el-table-column label="使用期限" width="190">
-          <template #default="{ row }">
-            <el-tag :type="row.expiry_locked ? 'danger' : 'info'">
-              {{ row.expiry_locked ? '已到期，已锁定' : (row.access_expires_at === '-' ? '尚未开始计时' : row.access_expires_at) }}
-            </el-tag>
+          <template #default>
+            <el-tag type="info">无时间限制</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="batch_no" label="批次号" min-width="220" />

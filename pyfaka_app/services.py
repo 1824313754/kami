@@ -2088,8 +2088,7 @@ def cleanup_expired_extracted_cdkeys(
     expire_after_hours: int = 24,
     workers: int = DEFAULT_LIVE_CHECK_WORKERS,
 ) -> dict[str, int]:
-    # Kept for existing maintenance callers: expiration now blocks guest access
-    # on request; retain cards and bound files so an administrator can unlock.
+    # Kept for existing maintenance callers: cards and bound files do not expire.
     return {"deleted_cdkeys": 0, "deleted_files": 0, "delete_failed": 0}
 
 

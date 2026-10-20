@@ -37,7 +37,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from .cdkey_password import CARD_ACCESS_HOURS, PASSWORD_FAILURE_LIMIT, CdkeyPasswordError, cdkey_access_deadline, cdkey_access_expired, decrypt_cdkey_password, password_cipher, validate_cdkey_password, verify_cdkey_password
+from .cdkey_password import PASSWORD_FAILURE_LIMIT, CdkeyPasswordError, decrypt_cdkey_password, password_cipher, validate_cdkey_password, verify_cdkey_password
 from .database import DATA_DIR, SessionLocal
 from .models import AdminUser, AuditLog, Cdkey, CdkeyBatch, FileRecord, FileRecordPayload, UploadBatch, UploadResult
 from .services import (
@@ -415,7 +415,7 @@ def query_cards_unlocked(ids: list[int], versions_key: str) -> bool:
         Cdkey.access_admin_locked.is_(False),
     ).all()
     return len(cards) == len(set(ids)) and all(
-        not cdkey_access_expired(card) and versions.get(str(card.id)) == card.access_password_version
+        versions.get(str(card.id)) == card.access_password_version
         for card in cards
     )
 
@@ -1270,7 +1270,6 @@ def file_item_payload(item: FileRecord) -> dict:
 
 
 def cdkey_item_payload(item: Cdkey) -> dict:
-    expiry_locked = cdkey_access_expired(item)
     password_locked = item.access_password_failures >= PASSWORD_FAILURE_LIMIT
     return {
         "id": item.id,
@@ -1282,9 +1281,10 @@ def cdkey_item_payload(item: Cdkey) -> dict:
         "password_failures": item.access_password_failures,
         "password_locked": password_locked,
         "admin_locked": item.access_admin_locked,
-        "access_locked": expiry_locked or password_locked or item.access_admin_locked,
-        "expiry_locked": expiry_locked,
-        "access_expires_at": format_time_text(cdkey_access_deadline(item)),
+        "access_locked": password_locked or item.access_admin_locked,
+        # Retain the response fields for existing clients; card access has no deadline.
+        "expiry_locked": False,
+        "access_expires_at": "-",
         "files_per_key": item.files_per_key,
         "extraction_no": item.extraction_no or "",
         "batch_id": item.batch.id if item.batch else None,
@@ -3942,7 +3942,7 @@ def api_change_cdkey_password(cdkey_id: int):
         Cdkey.access_password_version: Cdkey.access_password_version + 1,
     }, synchronize_session=False)
     log_audit("CHANGE_CDKEY_PASSWORD", "cdkey", cdkey_id, "changed extraction password; previous guest credentials revoked")
-    return api_ok({"message": "提取密码已修改，用户需重新输入卡密和新密码；锁定状态和使用期限保持不变"})
+    return api_ok({"message": "提取密码已修改，用户需重新输入卡密和新密码；锁定状态保持不变"})
 
 
 @bp.post("/api/admin/cdkeys/<int:cdkey_id>/lock")
@@ -3971,14 +3971,8 @@ def api_unlock_cdkey_password(cdkey_id: int):
         {Cdkey.access_password_failures: 0, Cdkey.access_admin_locked: False}, synchronize_session=False,
     )
     db().refresh(card, with_for_update=True)
-    if card.extracted_at is not None:
-        card.access_unlocked_until = datetime.now() + timedelta(hours=CARD_ACCESS_HOURS)
-    deadline = format_time_text(cdkey_access_deadline(card))
-    log_audit("UNLOCK_CDKEY_PASSWORD", "cdkey", cdkey_id, f"clear admin lock and password failure count; access_expires_at={deadline}; password and first extraction time unchanged")
-    message = "卡密已解锁，请使用当前绑定的提取密码"
-    if card.extracted_at is not None:
-        message += f"；可使用至 {deadline}，到期后再次锁定"
-    return api_ok({"message": message, "access_expires_at": deadline})
+    log_audit("UNLOCK_CDKEY_PASSWORD", "cdkey", cdkey_id, "clear admin lock and password failure count; password and first extraction time unchanged")
+    return api_ok({"message": "卡密已解锁，请使用当前绑定的提取密码", "access_expires_at": "-"})
 
 
 @bp.get("/api/admin/cdkeys/<int:cdkey_id>")

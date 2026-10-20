@@ -733,7 +733,7 @@ onBeforeUnmount(() => {
       >
         <template #default>
           <span class="query-notice-line">首次提取设置至少 6 位字母数字组合密码，三个模块共用。<strong class="query-notice-warning">请勿与链动小铺的联系方式或安全密码相同。</strong></span>
-          <span class="query-notice-line">累计输错 10 次或首次成功提取满 24 小时即锁定全部功能，管理员解锁后再用 24 小时。</span>
+          <span class="query-notice-line">卡密无使用时间限制；累计输错密码 10 次会锁定全部功能，需联系管理员解锁。</span>
           <span class="query-notice-line">忘记密码 / 解锁：QQ 3510485065 · QQ 群 730441960。</span>
         </template>
       </el-alert>

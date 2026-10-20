@@ -2,7 +2,6 @@ import base64
 import hashlib
 import hmac
 import re
-from datetime import datetime, timedelta
 
 from cryptography.fernet import Fernet, InvalidToken
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -10,7 +9,6 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from .models import Cdkey
 
 PASSWORD_FAILURE_LIMIT = 10
-CARD_ACCESS_HOURS = 24
 
 
 class CdkeyPasswordError(ValueError):
@@ -18,17 +16,6 @@ class CdkeyPasswordError(ValueError):
         super().__init__(message)
         self.code = code
         self.status = status
-
-
-def cdkey_access_deadline(card):
-    if card.extracted_at is None:
-        return None
-    return card.access_unlocked_until or card.extracted_at + timedelta(hours=CARD_ACCESS_HOURS)
-
-
-def cdkey_access_expired(card):
-    deadline = cdkey_access_deadline(card)
-    return deadline is not None and datetime.now() >= deadline
 
 
 def validate_cdkey_password(password):
@@ -63,8 +50,6 @@ def verify_cdkey_password(db, cdkeys, password, *, secret_key, allow_setup=False
             db.refresh(card, with_for_update=True)
         if any(card.access_admin_locked for card in cards):
             raise CdkeyPasswordError("卡密已被管理员锁定，请联系管理员解锁", "CDKEY_ADMIN_LOCKED", 423)
-        if any(cdkey_access_expired(card) for card in cards):
-            raise CdkeyPasswordError("卡密 24 小时使用期限已满，已锁定，请联系管理员解锁", "CDKEY_EXPIRED", 423)
         if any(card.access_password_failures >= PASSWORD_FAILURE_LIMIT for card in cards):
             raise CdkeyPasswordError("卡密已锁定，请联系管理员解锁", "PASSWORD_LOCKED", 423)
         for card in cards:
